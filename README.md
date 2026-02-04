@@ -65,13 +65,76 @@ Click the OpenInFinder button and it'll open a folder, you can place wallpapers 
 
 
 
-<!-- ## Installation(Compile from source)
-- macOS 15+
-- git
-- Xcode
-- Cmake
-  
-Run this: `git clone https://github.com/thusvill/LiveWallpaperMacOS.git && cd LiveWallpaperMacOS && mkdir -p build && cd build && cmake .. && make -j$(sysctl -n hw.ncpu)` -->
+## Building from Source
+
+### Requirements
+- macOS 15.0+ (Sequoia)
+- Xcode 16+
+- Git
+
+### Build Steps
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/thusvill/LiveWallpaperMacOS.git
+   cd LiveWallpaperMacOS
+   ```
+
+2. **Open in Xcode**
+   ```bash
+   open LiveWallpaper.xcodeproj
+   ```
+
+3. **Build the project**
+   - In Xcode: `Product → Build` (or press `Cmd+B`)
+   - Or from terminal:
+     ```bash
+     xcodebuild -project LiveWallpaper.xcodeproj -scheme LiveWallpaper -configuration Debug build
+     ```
+
+4. **Run the app**
+   - In Xcode: `Product → Run` (or press `Cmd+R`)
+   - Or find the built app in `DerivedData/LiveWallpaper/Build/Products/Debug/`
+
+### Creating a Release Build
+
+1. **Archive the project**
+   ```bash
+   xcodebuild -project LiveWallpaper.xcodeproj \
+     -scheme LiveWallpaper \
+     -configuration Release \
+     -archivePath build/LiveWallpaper.xcarchive \
+     archive
+   ```
+
+2. **Export the app** (requires signing configuration)
+   - In Xcode: `Product → Archive`, then `Distribute App`
+   - Or manually create a DMG from the archived app
+
+### Publishing a Release on GitHub
+
+1. **Create a version tag**
+   ```bash
+   git tag -a v1.x.x -m "Release v1.x.x"
+   git push origin v1.x.x
+   ```
+
+2. **Create a release using GitHub CLI**
+   ```bash
+   # Zip the app
+   cd build/Release
+   zip -r LiveWallpaper.zip LiveWallpaper.app
+
+   # Create release
+   gh release create v1.x.x LiveWallpaper.zip \
+     --title "LiveWallpaper v1.x.x" \
+     --notes "Release notes here"
+   ```
+
+3. **Or create a release manually**
+   - Go to GitHub → Releases → Draft a new release
+   - Select the tag, add release notes
+   - Upload the zipped app or DMG
 
 <!-- ## Gallery
 > <img width="185" height="134" alt="Screenshot 2025-11-30 at 1 52 01 PM" src="https://github.com/user-attachments/assets/0c91fb29-e729-485b-8f93-7080aed68881" />

@@ -38,22 +38,26 @@ struct LiveWallpaperApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var window: NSWindow!
-    
+    var slideshowWindow: NSWindow?
+    var aerialWindow: NSWindow?
+
     let engine = sharedEngine
+    let viewModel = WallpaperViewModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        
+
         NSApp.setActivationPolicy(.accessory)
 
-        
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "play.desktopcomputer", accessibilityDescription: "Live Wallpaper")
         }
 
-        
+
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Show Window", action: #selector(showWindow), keyEquivalent: "s"))
+        menu.addItem(NSMenuItem(title: "Slideshow", action: #selector(showSlideshowWindow), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Hide Window", action: #selector(hideWindow), keyEquivalent: "h"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
@@ -102,9 +106,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.orderOut(nil)
     }
 
+    // Show slideshow settings window
+    @objc func showSlideshowWindow() {
+        // Reload videos before showing the window
+        viewModel.reloadContent()
+
+        if slideshowWindow == nil {
+            slideshowWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 550, height: 650),
+                styleMask: [.titled, .closable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            slideshowWindow?.titlebarAppearsTransparent = true
+            slideshowWindow?.isMovableByWindowBackground = true
+            slideshowWindow?.title = "Slideshow Settings"
+            slideshowWindow?.isReleasedWhenClosed = false
+            slideshowWindow?.contentView = NSHostingView(rootView: SlideshowView(viewModel: viewModel))
+        }
+        slideshowWindow?.center()
+        slideshowWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // Show Aerial download window
+    @objc func showAerialWindow() {
+        viewModel.reloadContent()
+
+        if aerialWindow == nil {
+            aerialWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 700, height: 600),
+                styleMask: [.titled, .closable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            aerialWindow?.titlebarAppearsTransparent = true
+            aerialWindow?.isMovableByWindowBackground = true
+            aerialWindow?.title = "Download Aerial Wallpapers"
+            aerialWindow?.isReleasedWhenClosed = false
+            aerialWindow?.contentView = NSHostingView(rootView: AerialBrowserView(viewModel: viewModel))
+        }
+        aerialWindow?.center()
+        aerialWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     // Quit the app completely
     @objc func quit() {
-        
+
         engine?.terminateApplication()
         NSApp.terminate(nil)
     }

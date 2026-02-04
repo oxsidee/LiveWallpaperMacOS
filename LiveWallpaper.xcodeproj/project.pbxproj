@@ -21,7 +21,6 @@
 		04E0570B2EEAB3EE00F90A44 /* WallpaperEngine.mm in Sources */ = {isa = PBXBuildFile; fileRef = 04E056F02EEAB3EE00F90A44 /* WallpaperEngine.mm */; };
 		04E057192EEAB3EE00F90A44 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E0565F2EEAB3EE00F90A44 /* ContentView.swift */; };
 		04E0571C2EEAB3EE00F90A44 /* SaveSystem.mm in Sources */ = {isa = PBXBuildFile; fileRef = 04E0566C2EEAB3EE00F90A44 /* SaveSystem.mm */; };
-		04E057252EEAB3EE00F90A44 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 04E0565C2EEAB3EE00F90A44 /* AppIcon.icon */; };
 		04E057382EEAB3EE00F90A44 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 04E0565D2EEAB3EE00F90A44 /* Assets.xcassets */; };
 		04E057742EEAB43200F90A44 /* emitterstate.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 04E0574A2EEAB43200F90A44 /* emitterstate.cpp */; };
 		04E057752EEAB43200F90A44 /* nodebuilder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 04E057562EEAB43200F90A44 /* nodebuilder.cpp */; };
@@ -89,7 +88,6 @@
 		04E055E02EEA8C2E00F90A44 /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = System/Library/Frameworks/IOKit.framework; sourceTree = SDKROOT; };
 		04E055E22EEA8CB600F90A44 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
 		04E055E82EEA8D2C00F90A44 /* wallpaperdaemon */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = wallpaperdaemon; sourceTree = BUILT_PRODUCTS_DIR; };
-		04E0565C2EEAB3EE00F90A44 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = SOURCE_ROOT; };
 		04E0565D2EEAB3EE00F90A44 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = SOURCE_ROOT; };
 		04E0565F2EEAB3EE00F90A44 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = SOURCE_ROOT; };
 		04E056612EEAB3EE00F90A44 /* DisplayManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DisplayManager.h; sourceTree = SOURCE_ROOT; };
@@ -347,7 +345,6 @@
 		04E0565B2EEAB3DD00F90A44 /* LiveWallpaper */ = {
 			isa = PBXGroup;
 			children = (
-				04E0565C2EEAB3EE00F90A44 /* AppIcon.icon */,
 				04E0565D2EEAB3EE00F90A44 /* Assets.xcassets */,
 				04E0565F2EEAB3EE00F90A44 /* ContentView.swift */,
 				04E056612EEAB3EE00F90A44 /* DisplayManager.h */,
@@ -715,7 +712,6 @@
 		04E007082EEA738C00F90A44 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
-				04E057252EEAB3EE00F90A44 /* AppIcon.icon in Resources */,
 				04E057942EEAB43200F90A44 /* yaml-cpp.natvis.md in Resources */,
 				04E057952EEAB43200F90A44 /* yaml-cpp.natvis in Resources */,
 				04E057382EEAB3EE00F90A44 /* Assets.xcassets in Resources */,
@@ -900,11 +896,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				AUTOMATION_APPLE_EVENTS = NO;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 44DJWYP5M6;
+				DEVELOPMENT_TEAM = 9GJK56NW98;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_PREVIEWS = YES;
@@ -952,11 +948,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				AUTOMATION_APPLE_EVENTS = NO;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 44DJWYP5M6;
+				DEVELOPMENT_TEAM = 9GJK56NW98;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_PREVIEWS = YES;
@@ -1004,7 +1000,7 @@
 				AUTOMATION_APPLE_EVENTS = NO;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 44DJWYP5M6;
+				DEVELOPMENT_TEAM = 9GJK56NW98;
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
 				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
@@ -1012,7 +1008,7 @@
 				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
-				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.thusvill.LiveWallpaper;
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]" = com.thusvill.Livewallpaper;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1031,7 +1027,7 @@
 				AUTOMATION_APPLE_EVENTS = NO;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 44DJWYP5M6;
+				DEVELOPMENT_TEAM = 9GJK56NW98;
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
 				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
@@ -1039,7 +1035,7 @@
 				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
-				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.thusvill.LiveWallpaper;
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]" = com.thusvill.Livewallpaper;
 				PRODUCT_NAME = "$(TARGET_NAME)";

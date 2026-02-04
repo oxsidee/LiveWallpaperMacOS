@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "community",
+      "name": "Community Videos",
+      "url": "https://raw.githubusercontent.com/EvolveEcosystem/screensaver.evolve.aerial/master/resources/lib/aerial.json",
+      "format": "categories",
+      "description": "From Joshua Michaels & Hal Bergman",
+      "lastUpdated": "2026-01-19"
+    },
+    {
+      "id": "macos26",
+      "name": "macOS 26",
+      "url": "https://sylvan.apple.com/Aerials/2x/entries.json",
+      "format": "entries",
+      "description": "High framerate videos from macOS 26",
+      "lastUpdated": "2025-07-23"
+    },
+    {
+      "id": "tvos16",
+      "name": "tvOS 16",
+      "url": "https://sylvan.apple.com/Aerials/2x/entries.json",
+      "format": "entries",
+      "description": "Apple TV screensavers from tvOS 16",
+      "lastUpdated": "2022-04-20"
+    },
+    {
+      "id": "tvos13",
+      "name": "tvOS 13",
+      "url": "https://sylvan.apple.com/Aerials/2x/entries.json",
+      "format": "entries",
+      "description": "Apple TV screensavers from tvOS 13",
+      "lastUpdated": "2020-01-28"
+    }
+  ]
+}

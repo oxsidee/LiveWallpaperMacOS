@@ -175,7 +175,8 @@
   [window setIgnoresMouseEvents:YES];
 
   _asset = [AVAsset assetWithURL:videoURL];
-  AVPlayerItem *item = [[AVPlayerItem alloc] initWithAsset:_asset];
+  // Use URL-based init to work around AVTelemetryInterval bug in macOS 26
+  AVPlayerItem *item = [[AVPlayerItem alloc] initWithURL:videoURL];
   AVQueuePlayer *player = [AVQueuePlayer queuePlayerWithItems:@[]];
   AVPlayerLooper *looper = [AVPlayerLooper playerLooperWithPlayer:player
                                                      templateItem:item];

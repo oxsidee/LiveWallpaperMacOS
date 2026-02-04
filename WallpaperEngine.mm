@@ -25,6 +25,9 @@
 #import <mach/mach.h>
 #include <spawn.h>
 #include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#import <Foundation/Foundation.h>
 
 namespace fs = std::filesystem;
 
@@ -70,17 +73,30 @@ static NSString *folderPath = nil;
     [self killAllDaemons];
     usleep(2);
 
-    displays = SaveSystem::Load();
+    // Load saved display configurations and merge with current displays
+    std::list<Display> savedDisplays = SaveSystem::Load();
+
+    // Merge saved video paths into current displays (preserving all connected monitors)
+    for (const auto &saved : savedDisplays) {
+      for (auto &current : displays) {
+        if (current.uuid == saved.uuid) {
+          current.videoPath = saved.videoPath;
+          current.framePath = saved.framePath;
+          break;
+        }
+      }
+    }
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
-    for (Display display : displays) {
-      CGDirectDisplayID displayID = DisplayIDFromUUID(display.uuid);
-      if ([defaults boolForKey:@"random"]) {
-        [self randomWallpapersLid];
-      } else {
+    if ([defaults boolForKey:@"random"]) {
+      // Apply random wallpapers to ALL displays
+      [self randomWallpapersLid];
+    } else {
+      // Apply saved wallpapers to each display
+      for (const Display &display : displays) {
         if (!display.videoPath.empty()) {
-
+          CGDirectDisplayID displayID = DisplayIDFromUUID(display.uuid);
           [self
               startWallpaperWithPath:[NSString
                                          stringWithUTF8String:display.videoPath
@@ -94,17 +110,22 @@ static NSString *folderPath = nil;
 }
 
 - (void)randomWallpapersLid {
+  NSLog(@"Applying Random Wallpapers to all displays!");
 
-  NSLog(@"Applying Random Wallpapers!");
+  // Ensure displays list is up to date
+  ScanDisplays();
 
-  for (Display display : displays) {
+  for (const Display &display : displays) {
+    CGDirectDisplayID displayID = display.screen;
 
-    if (!display.videoPath.empty()) {
-      CGDirectDisplayID displayID = DisplayIDFromUUID(display.uuid);
+    // Skip invalid display IDs
+    if (displayID == kCGNullDirectDisplay) {
+      continue;
+    }
 
-      [self startWallpaperWithPath:
-                [self getRandomVideoFileFromFolder:[self getFolderPath]]
-                        onDisplays:@[ @(displayID) ]];
+    NSString *randomVideo = [self getRandomVideoFileFromFolder:[self getFolderPath]];
+    if (randomVideo) {
+      [self startWallpaperWithPath:randomVideo onDisplays:@[ @(displayID) ]];
     }
   }
 }
@@ -182,15 +203,34 @@ static NSString *folderPath = nil;
 }
 
 - (void)aweakHandle:(NSNotification *)note {
+  NSLog(@"Screen Awake!");
 
-  if ([[NSUserDefaults standardUserDefaults] floatForKey:@"random_lid"]) {
-    NSLog(@"Screen Aweaked!");
+  // Update displays list before applying wallpapers
+  ScanDisplays();
+
+  if ([[NSUserDefaults standardUserDefaults] boolForKey:@"random_lid"]) {
     [self randomWallpapersLid];
+  } else {
+    // Reapply saved wallpapers to all displays
+    [self reapplyWallpapersToAllDisplays];
+  }
+}
+
+- (void)reapplyWallpapersToAllDisplays {
+  for (const Display &display : displays) {
+    if (!display.videoPath.empty()) {
+      CGDirectDisplayID displayID = display.screen;
+      if (displayID != kCGNullDirectDisplay) {
+        [self startWallpaperWithPath:[NSString stringWithUTF8String:display.videoPath.c_str()]
+                          onDisplays:@[ @(displayID) ]];
+      }
+    }
   }
 }
 
 - (void)screensDidChange:(NSNotification *)note {
-  NSLog(@"Screens changed");
+  NSLog(@"Screens changed - updating display list");
+  ScanDisplays();
 }
 
 - (NSString *)thumbnailCachePath {
@@ -976,6 +1016,53 @@ static NSString *folderPath = nil;
   NSString *daemonPath =
       [appPath stringByAppendingPathComponent:daemonRelativePath];
 
+  // Check if daemon exists
+  NSFileManager *fm = [NSFileManager defaultManager];
+  BOOL daemonExists = [fm fileExistsAtPath:daemonPath];
+  BOOL isExecutable = [fm isExecutableFileAtPath:daemonPath];
+  
+  NSLog(@"🔍 Launching daemon:");
+  NSLog(@"   App path: %@", appPath);
+  NSLog(@"   Daemon path: %@", daemonPath);
+  NSLog(@"   Daemon exists: %@", daemonExists ? @"YES" : @"NO");
+  NSLog(@"   Daemon is executable: %@", isExecutable ? @"YES" : @"NO");
+  
+  if (!daemonExists) {
+    NSLog(@"❌ ERROR: Daemon file does not exist at path: %@", daemonPath);
+    // Try alternative path (for development builds)
+    NSString *altPath = [[[NSBundle mainBundle] executablePath] stringByDeletingLastPathComponent];
+    altPath = [altPath stringByAppendingPathComponent:@"wallpaperdaemon"];
+    if ([fm fileExistsAtPath:altPath]) {
+      NSLog(@"✅ Found daemon at alternative path: %@", altPath);
+      daemonPath = altPath;
+      daemonExists = YES;
+      isExecutable = [fm isExecutableFileAtPath:daemonPath];
+    } else {
+      NSLog(@"❌ ERROR: Daemon not found at alternative path either: %@", altPath);
+      return;
+    }
+  }
+  
+  // Try to make daemon executable if it's not
+  if (daemonExists && !isExecutable) {
+    NSLog(@"⚠️ Daemon exists but is not executable, attempting to set permissions...");
+    NSTask *chmodTask = [[NSTask alloc] init];
+    chmodTask.launchPath = @"/bin/chmod";
+    chmodTask.arguments = @[@"+x", daemonPath];
+    @try {
+      [chmodTask launch];
+      [chmodTask waitUntilExit];
+      if (chmodTask.terminationStatus == 0) {
+        NSLog(@"✅ Successfully set executable permissions");
+        isExecutable = YES;
+      } else {
+        NSLog(@"⚠️ Failed to set executable permissions (status: %d)", chmodTask.terminationStatus);
+      }
+    } @catch (NSException *exception) {
+      NSLog(@"⚠️ Exception while setting permissions: %@", exception.reason);
+    }
+  }
+
   float volume =
       [[NSUserDefaults standardUserDefaults] floatForKey:@"wallpapervolume"];
   NSString *volumeStr = [NSString stringWithFormat:@"%.2f", volume];
@@ -989,13 +1076,15 @@ static NSString *folderPath = nil;
     [[NSUserDefaults standardUserDefaults] synchronize];
   }
 
-  NSLog(@"Scaling mode: %@", scaleMode);
+  NSLog(@"   Scaling mode: %@", scaleMode);
+  NSLog(@"   Video path: %@", videoPath);
+  NSLog(@"   Image path: %@", imagePath);
 
   if (!displayID) {
-    NSLog(@"Display ID not valid %u", displayID);
+    NSLog(@"⚠️ Display ID not valid %u", displayID);
     displayID = [[[NSScreen mainScreen] deviceDescription][@"NSScreenNumber"]
         unsignedIntValue];
-    NSLog(@"Display ID changed to %u", displayID);
+    NSLog(@"   Display ID changed to %u", displayID);
   }
 
   NSString *display = [NSString stringWithFormat:@"%u", displayID];
@@ -1013,10 +1102,31 @@ static NSString *folderPath = nil;
   int status =
       posix_spawn(&pid, daemonPathC, NULL, NULL, (char *const *)args, environ);
   if (status != 0) {
-    NSLog(@"Failed to launch daemon: %d", status);
+    NSLog(@"❌ Failed to launch daemon via posix_spawn: %d (errno: %d, %s)", status, errno, strerror(errno));
+    
+    // Try alternative method using NSTask
+    NSLog(@"🔄 Trying alternative launch method with NSTask...");
+    @try {
+      NSTask *task = [[NSTask alloc] init];
+      task.launchPath = daemonPath;
+      task.arguments = @[
+        videoPath,
+        imagePath,
+        volumeStr,
+        scaleMode,
+        display
+      ];
+      [task launch];
+      pid = task.processIdentifier;
+      _daemonPIDs.push_back(pid);
+      NSLog(@"✅ Launched daemon with NSTask, PID: %d", pid);
+    } @catch (NSException *exception) {
+      NSLog(@"❌ NSTask also failed: %@", exception.reason);
+      return;
+    }
   } else {
     _daemonPIDs.push_back(pid);
-    NSLog(@"Launched daemon with PID: %d", pid);
+    NSLog(@"✅ Launched daemon with posix_spawn, PID: %d", pid);
   }
   SetWallpaperDisplay(pid, displayID, std::string([videoPath UTF8String]),
                       std::string([imagePath UTF8String]));
