@@ -45,6 +45,10 @@
 - (void)applyWallpaperToDisplay:(CGDirectDisplayID)displayID
                       videoPath:(NSString *)videoPath;
 
+// Smooth crossfade transition to new video (for slideshow)
+- (void)transitionToVideo:(NSString *)videoPath
+               onDisplays:(NSArray<NSNumber *> *)displayIDs;
+
 - (void)killAllDaemons;
 
 - (NSString *)thumbnailCachePath;

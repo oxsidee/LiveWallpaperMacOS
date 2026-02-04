@@ -303,6 +303,7 @@
 				04E055F32EEA8D6500F90A44 /* IOKit.framework in Frameworks */,
 				04E055F22EEA8D5C00F90A44 /* AVFoundation.framework in Frameworks */,
 				04E055F12EEA8D5700F90A44 /* Cocoa.framework in Frameworks */,
+				04E055442EEA795200F90A44 /* CoreMedia.framework in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */

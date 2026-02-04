@@ -644,6 +644,7 @@ class ThumbnailCache: ObservableObject {
     
     private init() {
         cache.countLimit = 100
+        cache.totalCostLimit = 50 * 1024 * 1024 // 50MB memory limit
         
         
         NotificationCenter.default.addObserver(
@@ -684,12 +685,31 @@ class ThumbnailCache: ObservableObject {
             return cached
         }
         
-        guard FileManager.default.fileExists(atPath: path),
-              let img = NSImage(contentsOfFile: path) else {
+        // Try jpg first, then fall back to png (legacy)
+        var actualPath = path
+        if !FileManager.default.fileExists(atPath: path) {
+            // Try alternate extension
+            if path.hasSuffix(".jpg") {
+                let pngPath = (path as NSString).deletingPathExtension + ".png"
+                if FileManager.default.fileExists(atPath: pngPath) {
+                    actualPath = pngPath
+                }
+            } else if path.hasSuffix(".png") {
+                let jpgPath = (path as NSString).deletingPathExtension + ".jpg"
+                if FileManager.default.fileExists(atPath: jpgPath) {
+                    actualPath = jpgPath
+                }
+            }
+        }
+        
+        guard FileManager.default.fileExists(atPath: actualPath),
+              let img = NSImage(contentsOfFile: actualPath) else {
             return nil
         }
         
-        cache.setObject(img, forKey: path as NSString)
+        // Estimate cost based on image size (width * height * 4 bytes per pixel)
+        let cost = Int(img.size.width * img.size.height * 4)
+        cache.setObject(img, forKey: path as NSString, cost: cost)
         return img
     }
     
@@ -755,7 +775,7 @@ class WallpaperViewModel: ObservableObject {
             let newVideos: [VideoItem] = videoFiles.map { f in
                 let full = (self.folderPath as NSString).appendingPathComponent(f)
                 let base = (f as NSString).deletingPathExtension
-                let thumbPath = (self.engine.thumbnailCachePath() as NSString?)?.appendingPathComponent("\(base).png") ?? ""
+                let thumbPath = (self.engine.thumbnailCachePath() as NSString?)?.appendingPathComponent("\(base).jpg") ?? ""
                 
                 var item = VideoItem(filename: f, path: full, thumbnailPath: thumbPath)
                 
@@ -837,9 +857,9 @@ class SlideshowManager: ObservableObject {
         didSet {
             UserDefaults.standard.set(isEnabled, forKey: "slideshow_enabled")
             if isEnabled {
-                startTimer()
+                start()
             } else {
-                stopTimer()
+                stop()
             }
         }
     }
@@ -853,14 +873,14 @@ class SlideshowManager: ObservableObject {
     @Published var intervalValue: Double = 30 {
         didSet {
             UserDefaults.standard.set(intervalValue, forKey: "slideshow_interval")
-            restartTimerIfNeeded()
+            restartIfNeeded()
         }
     }
 
     @Published var intervalUnit: IntervalUnit = .minutes {
         didSet {
             UserDefaults.standard.set(intervalUnit.rawValue, forKey: "slideshow_unit")
-            restartTimerIfNeeded()
+            restartIfNeeded()
         }
     }
 
@@ -869,9 +889,19 @@ class SlideshowManager: ObservableObject {
             UserDefaults.standard.set(syncDisplays, forKey: "slideshow_sync")
         }
     }
+    
+    @Published var switchMode: SwitchMode = .timerOnly {
+        didSet {
+            UserDefaults.standard.set(switchMode.rawValue, forKey: "slideshow_switch_mode")
+            restartIfNeeded()
+        }
+    }
 
     private var timer: Timer?
     private var lastAppliedIndex: Int = -1
+    private var videoEndObserver: NSObjectProtocol?
+    private var lastVideoEndSwitchTime: Date = .distantPast
+    private let videoEndDebounceInterval: TimeInterval = 2.0
 
     enum IntervalUnit: String, CaseIterable {
         case seconds = "seconds"
@@ -894,9 +924,24 @@ class SlideshowManager: ObservableObject {
             }
         }
     }
+    
+    enum SwitchMode: String, CaseIterable {
+        case timerOnly = "timer"
+        case videoEndOnly = "videoEnd"
+        case timerOrVideoEnd = "timerOrVideoEnd"
+        
+        var displayName: String {
+            switch self {
+            case .timerOnly: return "Timer only"
+            case .videoEndOnly: return "Video end only"
+            case .timerOrVideoEnd: return "Timer or video end"
+            }
+        }
+    }
 
     private init() {
         loadSettings()
+        setupVideoEndNotification()
     }
 
     private func loadSettings() {
@@ -910,10 +955,73 @@ class SlideshowManager: ObservableObject {
             intervalUnit = unit
         }
         syncDisplays = UserDefaults.standard.object(forKey: "slideshow_sync") as? Bool ?? true
+        
+        if let modeString = UserDefaults.standard.string(forKey: "slideshow_switch_mode"),
+           let mode = SwitchMode(rawValue: modeString) {
+            switchMode = mode
+        }
 
         if isEnabled && selectedVideoPaths.count >= 2 {
+            start()
+        }
+    }
+    
+    private func setupVideoEndNotification() {
+        // Listen for video end notification from daemon
+        videoEndObserver = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("VideoPlaybackDidEnd"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleVideoEnd()
+        }
+        
+        // Also listen via Darwin notification center
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let manager = Unmanaged<SlideshowManager>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    manager.handleVideoEnd()
+                }
+            },
+            "com.live.wallpaper.videoEnded" as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+    
+    private func handleVideoEnd() {
+        guard isEnabled, selectedVideoPaths.count >= 2 else { return }
+        guard switchMode == .videoEndOnly || switchMode == .timerOrVideoEnd else { return }
+        
+        // Debounce: several daemons (displays) can post at once
+        let now = Date()
+        if now.timeIntervalSince(lastVideoEndSwitchTime) < videoEndDebounceInterval { return }
+        lastVideoEndSwitchTime = now
+        
+        NSLog("[Slideshow] Video ended, switching wallpaper")
+        switchWallpaper()
+        
+        // Reset timer if in combined mode
+        if switchMode == .timerOrVideoEnd {
+            restartTimer()
+        }
+    }
+    
+    private func start() {
+        stop()
+        guard selectedVideoPaths.count >= 2 else { return }
+        
+        if switchMode == .timerOnly || switchMode == .timerOrVideoEnd {
             startTimer()
         }
+    }
+    
+    private func stop() {
+        stopTimer()
     }
 
     private func startTimer() {
@@ -922,18 +1030,32 @@ class SlideshowManager: ObservableObject {
 
         let interval = intervalValue * intervalUnit.multiplier
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.switchWallpaper()
+            self?.handleTimerFired()
         }
+    }
+    
+    private func handleTimerFired() {
+        guard isEnabled, selectedVideoPaths.count >= 2 else { return }
+        guard switchMode == .timerOnly || switchMode == .timerOrVideoEnd else { return }
+        
+        NSLog("[Slideshow] Timer fired, switching wallpaper")
+        switchWallpaper()
     }
 
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
     }
-
-    private func restartTimerIfNeeded() {
-        if isEnabled {
+    
+    private func restartTimer() {
+        if switchMode == .timerOnly || switchMode == .timerOrVideoEnd {
             startTimer()
+        }
+    }
+
+    private func restartIfNeeded() {
+        if isEnabled {
+            start()
         }
     }
 
@@ -958,18 +1080,18 @@ class SlideshowManager: ObservableObject {
         let displays = sharedEngine?.getDisplays() as? [DisplayObjc] ?? []
 
         if syncDisplays {
-            // Same wallpaper on all monitors
+            // Same wallpaper on all monitors with smooth crossfade
             let randomIndex = Int.random(in: 0..<selectedVideoPaths.count)
             let videoPath = selectedVideoPaths[randomIndex]
 
             let displayIDs = displays.map { NSNumber(value: $0.screen) }
-            sharedEngine?.startWallpaper(withPath: videoPath, onDisplays: displayIDs)
+            sharedEngine?.transition(toVideo: videoPath, onDisplays: displayIDs)
         } else {
-            // Different wallpaper on each monitor
+            // Different wallpaper on each monitor with smooth crossfade
             for display in displays {
                 let randomIndex = Int.random(in: 0..<selectedVideoPaths.count)
                 let videoPath = selectedVideoPaths[randomIndex]
-                sharedEngine?.startWallpaper(withPath: videoPath, onDisplays: [NSNumber(value: display.screen)])
+                sharedEngine?.transition(toVideo: videoPath, onDisplays: [NSNumber(value: display.screen)])
             }
         }
     }
@@ -977,7 +1099,7 @@ class SlideshowManager: ObservableObject {
     func getThumbnailPath(for videoPath: String) -> String {
         let filename = (videoPath as NSString).lastPathComponent
         let base = (filename as NSString).deletingPathExtension
-        return (sharedEngine?.thumbnailCachePath() as NSString?)?.appendingPathComponent("\(base).png") ?? ""
+        return (sharedEngine?.thumbnailCachePath() as NSString?)?.appendingPathComponent("\(base).jpg") ?? ""
     }
 }
 
@@ -1012,20 +1134,33 @@ struct SlideshowView: View {
                     .disabled(slideshowManager.selectedVideoPaths.count < 2)
             }
 
-            // Interval settings
-            SettingRow(title: "Switch every") {
-                HStack {
-                    TextField("", value: $slideshowManager.intervalValue, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 80)
-
-                    Picker("", selection: $slideshowManager.intervalUnit) {
-                        ForEach(SlideshowManager.IntervalUnit.allCases, id: \.self) { unit in
-                            Text(unit.displayName).tag(unit)
-                        }
+            // Switch mode
+            SettingRow(title: "Switch mode") {
+                Picker("", selection: $slideshowManager.switchMode) {
+                    ForEach(SlideshowManager.SwitchMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 100)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 160)
+            }
+            
+            // Interval settings (only show if timer is used)
+            if slideshowManager.switchMode != .videoEndOnly {
+                SettingRow(title: "Switch every") {
+                    HStack {
+                        TextField("", value: $slideshowManager.intervalValue, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+
+                        Picker("", selection: $slideshowManager.intervalUnit) {
+                            ForEach(SlideshowManager.IntervalUnit.allCases, id: \.self) { unit in
+                                Text(unit.displayName).tag(unit)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 100)
+                    }
                 }
             }
 
@@ -1309,127 +1444,97 @@ struct AerialAsset: Codable {
 // MARK: - Aerial Thumbnail Cache
 class AerialThumbnailCache: ObservableObject {
     static let shared = AerialThumbnailCache()
-    private var cache: [String: NSImage] = [:]
+    private let cache = NSCache<NSString, NSImage>()
     private var loading: Set<String> = []
+    private let maxConcurrentLoads = 3
+    private var pendingRequests: [(AerialVideo, String, (NSImage?) -> Void)] = []
+    
+    private init() {
+        cache.countLimit = 50
+        cache.totalCostLimit = 30 * 1024 * 1024 // 30MB limit for aerial thumbnails
+    }
     
     func getThumbnail(for video: AerialVideo, quality: String = "1080p-SDR", completion: @escaping (NSImage?) -> Void) {
         let cacheKey = "\(video.id)-\(quality)"
         
-        if let cached = cache[cacheKey] {
-            print("✅ Thumbnail cache hit for \(video.name) (\(quality))")
+        if let cached = cache.object(forKey: cacheKey as NSString) {
             completion(cached)
             return
         }
         
         if loading.contains(cacheKey) {
-            print("⏳ Thumbnail already loading for \(video.name) (\(quality))")
+            return
+        }
+        
+        // Limit concurrent loads to reduce network/CPU pressure
+        if loading.count >= maxConcurrentLoads {
+            pendingRequests.append((video, quality, completion))
             return
         }
         
         loading.insert(cacheKey)
-        print("🔄 Starting thumbnail load for \(video.name) (\(quality))")
         
-        let urlString: String?
-        switch quality {
-        case "4K-HDR":
-            urlString = video.url4KHDR
-        case "4K-SDR":
-            urlString = video.url4KSDR
-        case "1080p-SDR":
-            urlString = video.url1080pSDR
-        case "1080p-HDR":
-            urlString = video.url1080pHDR
-        case "1080p-H264":
-            urlString = video.url1080pH264
-        default:
-            urlString = video.url1080pSDR ?? video.url4KSDR
-        }
+        // Always use 1080p-H264 for thumbnails - smallest and fastest to decode
+        let urlString = video.url1080pH264 ?? video.url1080pSDR ?? video.url4KSDR
         
         guard let urlStr = urlString, let url = URL(string: urlStr) else {
-            print("❌ No URL available for \(video.name) (\(quality))")
             loading.remove(cacheKey)
+            processNextPending()
             completion(nil)
             return
         }
         
-        print("📥 Loading thumbnail from: \(urlStr)")
-        
         // Load asset asynchronously first to ensure tracks are available
         let asset = AVAsset(url: url)
-        print("🎬 Created AVAsset for \(video.name)")
         
-        asset.loadValuesAsynchronously(forKeys: ["tracks", "duration"]) { [weak self] in
+        asset.loadValuesAsynchronously(forKeys: ["tracks"]) { [weak self] in
             guard let self = self else { return }
             
             var error: NSError?
             let tracksStatus = asset.statusOfValue(forKey: "tracks", error: &error)
             
-            if let error = error {
-                print("❌ Failed to load tracks for \(video.name): \(error.localizedDescription)")
-            }
-            
             guard tracksStatus == .loaded else {
-                print("❌ Tracks not loaded for \(video.name), status: \(tracksStatus.rawValue)")
                 DispatchQueue.main.async {
                     self.loading.remove(cacheKey)
+                    self.processNextPending()
                     completion(nil)
                 }
                 return
             }
             
-            print("✅ Tracks loaded for \(video.name)")
-            
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(width: 320, height: 180)
-            generator.requestedTimeToleranceBefore = .zero
-            generator.requestedTimeToleranceAfter = .zero
+            // Allow some tolerance to avoid seeking issues
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
             
-            // Try multiple time points if first fails
-            let timePoints = [
-                CMTime(seconds: 1.0, preferredTimescale: 600),
-                CMTime(seconds: 0.5, preferredTimescale: 600),
-                CMTime(seconds: 2.0, preferredTimescale: 600)
-            ]
+            let timePoint = CMTime(seconds: 1.0, preferredTimescale: 600)
             
-            func tryGenerate(at index: Int) {
-                guard index < timePoints.count else {
-                    print("❌ All thumbnail generation attempts failed for \(video.name)")
-                    DispatchQueue.main.async {
-                        self.loading.remove(cacheKey)
-                        completion(nil)
-                    }
-                    return
-                }
+            generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: timePoint)]) { [weak self] _, cgImage, _, result, _ in
+                guard let self = self else { return }
                 
-                let timePoint = timePoints[index]
-                print("🖼️ Generating thumbnail for \(video.name) at time \(CMTimeGetSeconds(timePoint))s (attempt \(index + 1)/\(timePoints.count))")
-                
-                generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: timePoint)]) { [weak self] _, cgImage, _, result, error in
-                    guard let self = self else { return }
+                DispatchQueue.main.async {
+                    self.loading.remove(cacheKey)
+                    self.processNextPending()
                     
                     if result == .succeeded, let cgImage = cgImage {
-                        print("✅ Thumbnail generated successfully for \(video.name)")
-                        DispatchQueue.main.async {
-                            self.loading.remove(cacheKey)
-                            let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-                            self.cache[cacheKey] = nsImage
-                            completion(nsImage)
-                        }
+                        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                        let cost = cgImage.width * cgImage.height * 4
+                        self.cache.setObject(nsImage, forKey: cacheKey as NSString, cost: cost)
+                        completion(nsImage)
                     } else {
-                        if let error = error {
-                            print("⚠️ Thumbnail generation failed for \(video.name) at attempt \(index + 1): \(error.localizedDescription)")
-                        } else {
-                            print("⚠️ Thumbnail generation failed for \(video.name) at attempt \(index + 1), result: \(result.rawValue)")
-                        }
-                        // Try next time point
-                        tryGenerate(at: index + 1)
+                        completion(nil)
                     }
                 }
             }
-            
-            tryGenerate(at: 0)
         }
+    }
+    
+    private func processNextPending() {
+        guard !pendingRequests.isEmpty, loading.count < maxConcurrentLoads else { return }
+        let (video, quality, completion) = pendingRequests.removeFirst()
+        getThumbnail(for: video, quality: quality, completion: completion)
     }
 }
 

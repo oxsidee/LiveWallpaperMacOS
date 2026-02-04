@@ -56,9 +56,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Show Window", action: #selector(showWindow), keyEquivalent: "s"))
+        menu.addItem(NSMenuItem(title: "Manage wallpapers", action: #selector(showWindow), keyEquivalent: "m"))
         menu.addItem(NSMenuItem(title: "Slideshow", action: #selector(showSlideshowWindow), keyEquivalent: "l"))
-        menu.addItem(NSMenuItem(title: "Hide Window", action: #selector(hideWindow), keyEquivalent: "h"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu

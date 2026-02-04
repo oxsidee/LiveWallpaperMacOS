@@ -67,7 +67,7 @@ static NSString *folderPath = nil;
     _thumbnailQueue = dispatch_queue_create("com.livewallpaper.thumbnailQueue",
                                             DISPATCH_QUEUE_SERIAL);
 
-    _wallpaperSemaphore = dispatch_semaphore_create(2);
+    _wallpaperSemaphore = dispatch_semaphore_create(1);
     ScanDisplays();
 
     [self killAllDaemons];
@@ -562,11 +562,20 @@ static NSString *folderPath = nil;
       continue;
     }
 
-    // Check if thumbnail already exists
+    // Check if thumbnail already exists (check both jpg and legacy png)
     NSString *thumbName = [[filename stringByDeletingPathExtension]
-        stringByAppendingPathExtension:@"png"];
+        stringByAppendingPathExtension:@"jpg"];
     NSString *thumbPath =
         [thumbnailCachePath stringByAppendingPathComponent:thumbName];
+    
+    // Also check for legacy PNG thumbnails
+    NSString *legacyThumbName = [[filename stringByDeletingPathExtension]
+        stringByAppendingPathExtension:@"png"];
+    NSString *legacyThumbPath =
+        [thumbnailCachePath stringByAppendingPathComponent:legacyThumbName];
+    if ([fileManager fileExistsAtPath:legacyThumbPath]) {
+      continue; // Use existing PNG thumbnail
+    }
 
     BOOL isDir;
     NSLog(@"THUMB CHECK:\n  filename: %@\n  thumbPath: %@\n  exists: %d isDir: "
@@ -698,7 +707,7 @@ static NSString *folderPath = nil;
   CMTime targetTime = CMTimeMakeWithSeconds(midpoint, asset.duration.timescale);
 
   NSString *thumbName = [[filename stringByDeletingPathExtension]
-      stringByAppendingPathExtension:@"png"];
+      stringByAppendingPathExtension:@"jpg"];
   NSString *thumbPath =
       [thumbnailPath stringByAppendingPathComponent:thumbName];
   NSURL *thumbURL = [NSURL fileURLWithPath:thumbPath];
@@ -719,11 +728,15 @@ static NSString *folderPath = nil;
                                    CGImageDestinationCreateWithURL(
                                        (__bridge CFURLRef)thumbURL,
                                        (__bridge CFStringRef)
-                                           UTTypePNG.identifier,
+                                           UTTypeJPEG.identifier,
                                        1, NULL);
 
                                if (dest) {
-                                 CGImageDestinationAddImage(dest, copy, NULL);
+                                 // JPEG compression quality 0.7 for smaller files
+                                 NSDictionary *jpegOptions = @{
+                                   (__bridge id)kCGImageDestinationLossyCompressionQuality : @(0.7f)
+                                 };
+                                 CGImageDestinationAddImage(dest, copy, (__bridge CFDictionaryRef)jpegOptions);
                                  CGImageDestinationFinalize(dest);
                                  CFRelease(dest);
                                }
@@ -778,13 +791,13 @@ static NSString *folderPath = nil;
     }
 
     NSString *thumbName = [[filename stringByDeletingPathExtension]
-        stringByAppendingPathExtension:@"png"];
+        stringByAppendingPathExtension:@"jpg"];
     NSString *thumbPath =
         [thumbnailPath stringByAppendingPathComponent:thumbName];
     NSURL *thumbURL = [NSURL fileURLWithPath:thumbPath];
 
     CGImageDestinationRef destination = CGImageDestinationCreateWithURL(
-        (__bridge CFURLRef)thumbURL, kUTTypePNG, 1, NULL);
+        (__bridge CFURLRef)thumbURL, (__bridge CFStringRef)UTTypeJPEG.identifier, 1, NULL);
 
     if (!destination) {
       NSLog(@"Failed to create CGImageDestination for %@", thumbName);
@@ -793,17 +806,16 @@ static NSString *folderPath = nil;
     }
 
     NSDictionary *options = @{
-      (__bridge id)
-      kCGImageDestinationLossyCompressionQuality : @(THUMBNAIL_QUALITY_FACTOR)
+      (__bridge id)kCGImageDestinationLossyCompressionQuality : @(0.7f)
     };
 
     CGImageDestinationAddImage(destination, safeImage,
                                (__bridge CFDictionaryRef)options);
 
     if (!CGImageDestinationFinalize(destination)) {
-      NSLog(@"Failed to write PNG thumbnail: %@", thumbName);
+      NSLog(@"Failed to write JPEG thumbnail: %@", thumbName);
     } else {
-      NSLog(@"Saved PNG thumbnail: %@", thumbName);
+      NSLog(@"Saved JPEG thumbnail: %@", thumbName);
 
       // Post notification that this specific thumbnail is ready
       dispatch_async(dispatch_get_main_queue(), ^{
@@ -1006,6 +1018,71 @@ static NSString *folderPath = nil;
         videoPath);
 
   [self startWallpaperWithPath:videoPath onDisplays:@[ @(displayID) ]];
+}
+
+- (void)transitionToVideo:(NSString *)videoPath
+               onDisplays:(NSArray<NSNumber *> *)displayIDs {
+  if (!videoPath || videoPath.length == 0) {
+    NSLog(@"ERROR: Invalid videoPath for transition");
+    return;
+  }
+
+  // Check if there are running daemons to transition
+  if (_daemonPIDs.empty()) {
+    NSLog(@"No running daemons, starting fresh instead of transitioning");
+    [self startWallpaperWithPath:videoPath onDisplays:displayIDs];
+    return;
+  }
+
+  NSLog(@"🔄 Initiating crossfade transition to: %@", videoPath);
+
+  // Generate image path
+  const char *videoPathCStr = [videoPath UTF8String];
+  std::filesystem::path p(videoPathCStr);
+  std::string videoName = p.stem().string();
+
+  NSString *imageFilename = [NSString stringWithFormat:@"%s.png", videoName.c_str()];
+  NSString *imagePath = [[self staticWallpaperCachePath]
+      stringByAppendingPathComponent:imageFilename];
+
+  // Generate static wallpaper if needed
+  NSFileManager *fm = [NSFileManager defaultManager];
+  if (![fm fileExistsAtPath:imagePath] && !_generatingImages) {
+    [self generateStaticWallpapersForFolder:[self getFolderPath] withCompletion:nil];
+  }
+
+  // Store the new video path in UserDefaults for each display
+  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+
+  NSMutableArray<NSNumber *> *screensToUse = [displayIDs mutableCopy];
+  if (screensToUse.count == 0) {
+    screensToUse = [NSMutableArray array];
+    for (const Display &display : displays) {
+      [screensToUse addObject:@(display.screen)];
+    }
+  }
+
+  for (NSNumber *displayNum in screensToUse) {
+    CGDirectDisplayID displayID = (CGDirectDisplayID)[displayNum unsignedIntValue];
+
+    NSString *key = [NSString stringWithFormat:@"TransitionVideo_%u", displayID];
+    NSString *imageKey = [NSString stringWithFormat:@"TransitionImage_%u", displayID];
+
+    [defaults setObject:videoPath forKey:key];
+    [defaults setObject:imagePath forKey:imageKey];
+
+    NSLog(@"   Set transition for display %u", displayID);
+  }
+
+  [defaults synchronize];
+
+  // Send notification to all daemons
+  CFNotificationCenterPostNotification(
+      CFNotificationCenterGetDarwinNotifyCenter(),
+      CFSTR("com.live.wallpaper.videoChanged"), NULL, NULL, true);
+
+  self.currentVideoPath = videoPath;
+  NSLog(@"✅ Crossfade transition notification sent");
 }
 
 - (void)launchDaemonOnScreen:(NSString *)videoPath
