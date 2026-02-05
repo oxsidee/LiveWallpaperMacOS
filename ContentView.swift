@@ -538,6 +538,15 @@ struct SettingsView: View {
                             .toggleStyle(.switch)
                     }
                     
+                    // Restart Dock on wallpaper change (for menu bar color)
+                    SettingRow(title: "Restart Dock on Wallpaper Change") {
+                        Toggle("", isOn: Binding(
+                                get: { UserDefaults.standard.bool(forKey: "restartDockOnWallpaperChange") },
+                                set: { UserDefaults.standard.set($0, forKey: "restartDockOnWallpaperChange") }
+                            ))
+                            .toggleStyle(.switch)
+                    }
+                    
                     Divider()
                     
                     // Video Volume

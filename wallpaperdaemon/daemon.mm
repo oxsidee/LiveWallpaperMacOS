@@ -949,6 +949,18 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
                                                 forScreen:_targetScreen
                                                   options:options
                                                     error:&error];
+    
+    if (success && [defaults boolForKey:@"restartDockOnWallpaperChange"]) {
+      // Restart Dock to update menu bar color
+      // Need longer delay for system to register new wallpaper
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        NSTask *task = [[NSTask alloc] init];
+        task.launchPath = @"/usr/bin/killall";
+        task.arguments = @[@"Dock"];
+        [task launch];
+        NSLog(@"[Daemon] Restarted Dock to update menu bar color");
+      });
+    }
 
     return success;
   }
@@ -1175,6 +1187,7 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
 
       [strongSelf2 addLoopEndObserverForPlayer:newPlayer];
 
+      [strongSelf2 setStaticWallpaper];
       [win orderFront:nil];
 
       NSLog(@"[Daemon] Crossfade transition completed");

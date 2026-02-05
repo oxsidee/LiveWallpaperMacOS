@@ -90,8 +90,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             setLoginItem(enabled: true)
         }
         
-
-        
+        // Initialize slideshow if enabled
+        _ = SlideshowManager.shared
     }
 
     // Show the config window

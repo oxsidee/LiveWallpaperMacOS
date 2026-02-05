@@ -22,6 +22,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <IOKit/graphics/IOGraphicsLib.h>
 #include <filesystem>
+#include <set>
 #import <mach/mach.h>
 #include <spawn.h>
 #include <unistd.h>
@@ -230,7 +231,38 @@ static NSString *folderPath = nil;
 
 - (void)screensDidChange:(NSNotification *)note {
   NSLog(@"Screens changed - updating display list");
+  
+  // Remember old display UUIDs
+  std::set<std::string> oldUUIDs;
+  for (const Display &d : displays) {
+    oldUUIDs.insert(d.uuid);
+  }
+  
   ScanDisplays();
+  
+  // Find new displays and start wallpaper on them
+  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+  BOOL useRandom = [defaults boolForKey:@"random"];
+  
+  for (const Display &display : displays) {
+    if (oldUUIDs.find(display.uuid) == oldUUIDs.end()) {
+      // This is a new display
+      NSLog(@"New display detected: %s", display.uuid.c_str());
+      
+      CGDirectDisplayID displayID = display.screen;
+      if (displayID == kCGNullDirectDisplay) continue;
+      
+      if (useRandom) {
+        NSString *randomVideo = [self getRandomVideoFileFromFolder:[self getFolderPath]];
+        if (randomVideo) {
+          [self startWallpaperWithPath:randomVideo onDisplays:@[ @(displayID) ]];
+        }
+      } else if (_currentVideoPath) {
+        // Use current video on new display
+        [self startWallpaperWithPath:_currentVideoPath onDisplays:@[ @(displayID) ]];
+      }
+    }
+  }
 }
 
 - (NSString *)thumbnailCachePath {
