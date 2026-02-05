@@ -708,6 +708,11 @@ static NSString *folderPath = nil;
   AVAssetImageGenerator *generator =
       [[AVAssetImageGenerator alloc] initWithAsset:asset];
   generator.appliesPreferredTrackTransform = YES;
+  // Fix pink/magenta colors for HDR videos - use production aperture for proper color conversion
+  generator.apertureMode = AVAssetImageGeneratorApertureModeProductionAperture;
+  // Request exact time to get better quality frame
+  generator.requestedTimeToleranceBefore = kCMTimeZero;
+  generator.requestedTimeToleranceAfter = kCMTimeZero;
 
   NSArray<AVAssetTrack *> *videoTracks =
       [asset tracksWithMediaType:AVMediaTypeVideo];
@@ -754,7 +759,29 @@ static NSString *folderPath = nil;
                                NSError *imgError) {
                              if (result == AVAssetImageGeneratorSucceeded &&
                                  cgImage != NULL) {
-                               CGImageRef copy = CGImageCreateCopy(cgImage);
+                               // Convert HDR to sRGB to fix pink/magenta color issues
+                               CGColorSpaceRef srgbColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+                               CGImageRef srgbImage = NULL;
+                               
+                               // Check if color space conversion is needed
+                               CGColorSpaceRef srcColorSpace = CGImageGetColorSpace(cgImage);
+                               if (srcColorSpace && srgbColorSpace) {
+                                 // Create a bitmap context in sRGB color space
+                                 size_t width = CGImageGetWidth(cgImage);
+                                 size_t height = CGImageGetHeight(cgImage);
+                                 CGContextRef context = CGBitmapContextCreate(
+                                     NULL, width, height, 8, 0, srgbColorSpace,
+                                     kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+                                 
+                                 if (context) {
+                                   CGContextDrawImage(context, CGRectMake(0, 0, width, height), cgImage);
+                                   srgbImage = CGBitmapContextCreateImage(context);
+                                   CGContextRelease(context);
+                                 }
+                               }
+                               
+                               CGImageRef imageToSave = srgbImage ? srgbImage : CGImageCreateCopy(cgImage);
+                               CGColorSpaceRelease(srgbColorSpace);
 
                                CGImageDestinationRef dest =
                                    CGImageDestinationCreateWithURL(
@@ -768,12 +795,12 @@ static NSString *folderPath = nil;
                                  NSDictionary *jpegOptions = @{
                                    (__bridge id)kCGImageDestinationLossyCompressionQuality : @(0.7f)
                                  };
-                                 CGImageDestinationAddImage(dest, copy, (__bridge CFDictionaryRef)jpegOptions);
+                                 CGImageDestinationAddImage(dest, imageToSave, (__bridge CFDictionaryRef)jpegOptions);
                                  CGImageDestinationFinalize(dest);
                                  CFRelease(dest);
                                }
 
-                               CGImageRelease(copy);
+                               CGImageRelease(imageToSave);
 
                              } else {
                                NSLog(@"Thumbnail generation failed for %@: %@",

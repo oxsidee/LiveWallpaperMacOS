@@ -334,10 +334,11 @@ struct VideoGridView: View {
                     let selectedRemote = filteredVideos.filter { selectedVideoIDs.contains($0.id) && $0.isRemote }
                     if !selectedRemote.isEmpty {
                         Button(action: {
+                            let downloadQuality = UserDefaults.standard.string(forKey: "download_quality") ?? "4K-SDR"
                             for video in selectedRemote {
                                 if let aerialId = video.aerialId ?? video.id as String?,
                                    let aerial = downloadManager.videos.first(where: { $0.id == aerialId }) {
-                                    downloadManager.downloadVideo(aerial, quality: video.quality ?? "1080p-H264", to: viewModel.folderPath)
+                                    downloadManager.downloadVideo(aerial, quality: downloadQuality, to: viewModel.folderPath)
                                 }
                             }
                             selectedVideoIDs.removeAll()
@@ -713,12 +714,13 @@ struct RemoteVideoThumbnailButton: View {
                     .help("Waiting in queue...")
                 } else {
                     Button(action: {
+                        let downloadQuality = UserDefaults.standard.string(forKey: "download_quality") ?? "4K-SDR"
                         // Use original AerialVideo from downloadManager to preserve correct source
                         if let originalVideo = downloadManager.videos.first(where: { $0.id == video.aerialId || $0.id == video.id }) {
-                            downloadManager.downloadVideo(originalVideo, quality: video.quality ?? "1080p-H264", to: folderPath)
+                            downloadManager.downloadVideo(originalVideo, quality: downloadQuality, to: folderPath)
                         } else {
                             // Fallback to reconstructed video
-                            downloadManager.downloadVideo(aerialVideo, quality: video.quality ?? "1080p-H264", to: folderPath)
+                            downloadManager.downloadVideo(aerialVideo, quality: downloadQuality, to: folderPath)
                         }
                     }) {
                         Image(systemName: "arrow.down.circle.fill")
@@ -1080,6 +1082,22 @@ struct SettingsView: View {
                         Picker("", selection: Binding(
                             get: { UserDefaults.standard.string(forKey: "streaming_quality") ?? "1080p-H264" },
                             set: { UserDefaults.standard.set($0, forKey: "streaming_quality") }
+                        )) {
+                            Text("1080p H264").tag("1080p-H264")
+                            Text("1080p SDR").tag("1080p-SDR")
+                            Text("1080p HDR").tag("1080p-HDR")
+                            Text("4K SDR").tag("4K-SDR")
+                            Text("4K HDR").tag("4K-HDR")
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+                    }
+                    
+                    // Download Quality
+                    SettingRow(title: "Download Quality") {
+                        Picker("", selection: Binding(
+                            get: { UserDefaults.standard.string(forKey: "download_quality") ?? "4K-SDR" },
+                            set: { UserDefaults.standard.set($0, forKey: "download_quality") }
                         )) {
                             Text("1080p H264").tag("1080p-H264")
                             Text("1080p SDR").tag("1080p-SDR")
@@ -2846,6 +2864,8 @@ class AerialThumbnailCache: ObservableObject {
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(width: 320, height: 180)
+            // Fix pink/magenta colors for HDR videos
+            generator.apertureMode = .productionAperture
             // Allow some tolerance to avoid seeking issues
             generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
             generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
@@ -2860,8 +2880,11 @@ class AerialThumbnailCache: ObservableObject {
                     self.processNextPending()
                     
                     if result == .succeeded, let cgImage = cgImage {
-                        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-                        let cost = cgImage.width * cgImage.height * 4
+                        // Convert HDR to sRGB to fix color issues
+                        let convertedImage = self.convertToSRGB(cgImage)
+                        let finalImage = convertedImage ?? cgImage
+                        let nsImage = NSImage(cgImage: finalImage, size: NSSize(width: finalImage.width, height: finalImage.height))
+                        let cost = finalImage.width * finalImage.height * 4
                         self.cache.setObject(nsImage, forKey: cacheKey as NSString, cost: cost)
                         completion(nsImage)
                     } else {
@@ -2886,6 +2909,27 @@ class AerialThumbnailCache: ObservableObject {
     /// Clean up cancelled requests periodically
     func cleanupCancelled() {
         cancelledRequests.removeAll()
+    }
+    
+    /// Convert HDR image to sRGB to fix pink/magenta color issues
+    private func convertToSRGB(_ cgImage: CGImage) -> CGImage? {
+        guard let srgbColorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        
+        let width = cgImage.width
+        let height = cgImage.height
+        
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: srgbColorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        ) else { return nil }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
     }
 }
 
