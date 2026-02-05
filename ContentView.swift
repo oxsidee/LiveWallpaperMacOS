@@ -142,6 +142,9 @@ struct VideoGridView: View {
     @State private var selectedSource: String = "All"
     @StateObject private var downloadManager = AerialDownloadManager.shared
     @State private var showAerialVideos = false
+    @State private var isSelectionMode = false
+    @State private var selectedVideoIDs: Set<String> = []
+    @State private var showBatchDeleteConfirmation = false
     
     private let columns = [GridItem(.adaptive(minimum: 200), spacing: 12)]
     
@@ -159,61 +162,84 @@ struct VideoGridView: View {
         videos  // source and category are already set in reloadContent
     }
     
-    var aerialVideosAsItems: [VideoItem] {
-        // Don't show streaming when Local filter is selected
-        guard showAerialVideos && selectedSource != "Local" else { return [] }
-        let quality = UserDefaults.standard.string(forKey: "streaming_quality") ?? "1080p-H264"
-        
-        // First filter by source
-        let sourceFilteredVideos: [AerialVideo]
-        if selectedSource == "All" {
-            sourceFilteredVideos = downloadManager.videos
-        } else {
-            sourceFilteredVideos = downloadManager.videos.filter { $0.source == selectedSource }
-        }
-        
-        let result = sourceFilteredVideos.compactMap { aerial -> VideoItem? in
-            guard let url = aerial.getURL(forQuality: quality) else { return nil }
-            // Skip if already downloaded
-            if downloadManager.isDownloaded(aerial, quality: quality, in: viewModel.folderPath) {
-                return nil
-            }
-            // Use 1080p-H264 for thumbnails (smallest/fastest), but the selected quality URL for playback
-            let thumbURL = aerial.url1080pH264 ?? aerial.url1080pSDR ?? aerial.url4KSDR
-            return VideoItem(
-                filename: aerial.name,
-                path: url,
-                thumbnailPath: "",
-                quality: quality,
-                category: aerial.category,
-                isRemote: true,
-                remoteURL: url,
-                thumbnailURL: thumbURL,
-                source: aerial.source
-            )
-        }
-        
-        return result
-    }
-    
     var allVideos: [VideoItem] {
         var result: [VideoItem] = []
         
-        // Local videos
-        if selectedSource == "All" {
-            // Show all local videos
-            result = localVideosWithCategories
-        } else if selectedSource == "Local" {
-            // "Local" filter: show ALL local files regardless of their source
-            result = localVideosWithCategories
-        } else {
-            // Specific source: filter local videos by that source
-            result = localVideosWithCategories.filter { $0.source == selectedSource }
+        // For "Local" filter - show only local videos
+        if selectedSource == "Local" {
+            return localVideosWithCategories
         }
         
-        // Aerial (streaming) videos: add when showAerialVideos is on and not "Local" filter
-        if showAerialVideos && selectedSource != "Local" {
-            result += aerialVideosAsItems
+        // Build a map of local videos by aerialId for quick lookup
+        var localByAerialId: [String: VideoItem] = [:]
+        var localWithoutAerialId: [VideoItem] = []
+        
+        for video in localVideosWithCategories {
+            if let aerialId = video.aerialId {
+                localByAerialId[aerialId] = video
+            } else {
+                // Uploaded or unknown videos
+                localWithoutAerialId.append(video)
+            }
+        }
+        
+        // When showing aerial videos - merge in order of API
+        if showAerialVideos {
+            let quality = UserDefaults.standard.string(forKey: "streaming_quality") ?? "1080p-H264"
+            
+            // Filter aerial videos by source
+            let sourceFilteredAerials: [AerialVideo]
+            if selectedSource == "All" {
+                sourceFilteredAerials = downloadManager.videos
+            } else {
+                sourceFilteredAerials = downloadManager.videos.filter { $0.source == selectedSource }
+            }
+            
+            // Iterate through aerial videos in API order
+            for aerial in sourceFilteredAerials {
+                // If downloaded, use local version; otherwise use streaming
+                if let localVideo = localByAerialId[aerial.id] {
+                    result.append(localVideo)
+                } else if let url = aerial.getURL(forQuality: quality) {
+                    // Create streaming VideoItem
+                    let thumbURL = aerial.url1080pH264 ?? aerial.url1080pSDR ?? aerial.url4KSDR
+                    var qualities: [String] = []
+                    if aerial.url4KHDR != nil { qualities.append("4K-HDR") }
+                    if aerial.url4KSDR != nil { qualities.append("4K-SDR") }
+                    if aerial.url1080pHDR != nil { qualities.append("1080p-HDR") }
+                    if aerial.url1080pSDR != nil { qualities.append("1080p-SDR") }
+                    if aerial.url1080pH264 != nil { qualities.append("1080p-H264") }
+                    
+                    let streamingItem = VideoItem(
+                        filename: aerial.name,
+                        path: url,
+                        thumbnailPath: "",
+                        quality: quality,
+                        category: aerial.category,
+                        isRemote: true,
+                        remoteURL: url,
+                        thumbnailURL: thumbURL,
+                        source: aerial.source,
+                        aerialId: aerial.id,
+                        availableQualities: qualities
+                    )
+                    result.append(streamingItem)
+                }
+            }
+            
+            // Add uploaded/unknown local videos at the end
+            if selectedSource == "All" {
+                result.append(contentsOf: localWithoutAerialId)
+            } else {
+                result.append(contentsOf: localWithoutAerialId.filter { $0.source == selectedSource })
+            }
+        } else {
+            // Not showing aerial - just show local videos
+            if selectedSource == "All" {
+                result = localVideosWithCategories
+            } else {
+                result = localVideosWithCategories.filter { $0.source == selectedSource }
+            }
         }
         
         return result
@@ -260,6 +286,20 @@ struct VideoGridView: View {
                 
                 Spacer()
                 
+                // Selection mode toggle
+                Button(action: {
+                    isSelectionMode.toggle()
+                    if !isSelectionMode {
+                        selectedVideoIDs.removeAll()
+                    }
+                }) {
+                    Image(systemName: isSelectionMode ? "checkmark.circle.fill" : "checkmark.circle")
+                        .font(.system(size: 18))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(isSelectionMode ? .accentColor : .secondary)
+                .help(isSelectionMode ? "Exit selection" : "Select multiple")
+                
                 // Upload video button
                 Button(action: uploadVideo) {
                     Image(systemName: "plus.circle.fill")
@@ -281,6 +321,57 @@ struct VideoGridView: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
+            
+            // Selection mode bar
+            if isSelectionMode {
+                HStack {
+                    Text("\(selectedVideoIDs.count) selected")
+                        .font(.system(size: 12, weight: .medium))
+                    
+                    Spacer()
+                    
+                    // Download selected (only for remote videos)
+                    let selectedRemote = filteredVideos.filter { selectedVideoIDs.contains($0.id) && $0.isRemote }
+                    if !selectedRemote.isEmpty {
+                        Button(action: {
+                            for video in selectedRemote {
+                                if let aerialId = video.aerialId ?? video.id as String?,
+                                   let aerial = downloadManager.videos.first(where: { $0.id == aerialId }) {
+                                    downloadManager.downloadVideo(aerial, quality: video.quality ?? "1080p-H264", to: viewModel.folderPath)
+                                }
+                            }
+                            selectedVideoIDs.removeAll()
+                            isSelectionMode = false
+                        }) {
+                            Label("Download (\(selectedRemote.count))", systemImage: "arrow.down.circle")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    
+                    // Delete selected (only for local videos)
+                    let selectedLocal = filteredVideos.filter { selectedVideoIDs.contains($0.id) && !$0.isRemote }
+                    if !selectedLocal.isEmpty {
+                        Button(action: {
+                            showBatchDeleteConfirmation = true
+                        }) {
+                            Label("Delete (\(selectedLocal.count))", systemImage: "trash")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                    }
+                    
+                    Button("Cancel") {
+                        selectedVideoIDs.removeAll()
+                        isSelectionMode = false
+                    }
+                    .font(.system(size: 12))
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 6)
+                .background(Color.accentColor.opacity(0.1))
+            }
             
             // Source filter (show when there are multiple sources in local or streaming videos)
             if availableSources.count > 2 {
@@ -341,17 +432,7 @@ struct VideoGridView: View {
                                 LazyVGrid(columns: columns, spacing: 12) {
                                     let categoryVideos = groupedByCategory[category] ?? []
                                     ForEach(Array(categoryVideos.enumerated()), id: \.element.id) { idx, video in
-                                        if video.isRemote {
-                                            RemoteVideoThumbnailButton(video: video, action: {
-                                                onVideoSelect(video)
-                                            }, folderPath: viewModel.folderPath, index: idx)
-                                        } else {
-                                            VideoThumbnailButton(video: video, action: {
-                                                onVideoSelect(video)
-                                            }, onDelete: {
-                                                viewModel.deleteVideo(video)
-                                            })
-                                        }
+                                        videoCard(for: video, index: idx)
                                     }
                                 }
                                 .padding(.horizontal)
@@ -363,17 +444,7 @@ struct VideoGridView: View {
                     // Single category view
                     LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(Array(filteredVideos.enumerated()), id: \.element.id) { idx, video in
-                            if video.isRemote {
-                                RemoteVideoThumbnailButton(video: video, action: {
-                                    onVideoSelect(video)
-                                }, folderPath: viewModel.folderPath, index: idx)
-                            } else {
-                                VideoThumbnailButton(video: video, action: {
-                                    onVideoSelect(video)
-                                }, onDelete: {
-                                    viewModel.deleteVideo(video)
-                                })
-                            }
+                            videoCard(for: video, index: idx)
                         }
                     }
                     .padding(.horizontal)
@@ -381,7 +452,23 @@ struct VideoGridView: View {
                 }
             }
         }
+        .confirmationDialog("Delete \(selectedVideoIDs.count) videos?", isPresented: $showBatchDeleteConfirmation, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                let selectedLocal = filteredVideos.filter { selectedVideoIDs.contains($0.id) && !$0.isRemote }
+                for video in selectedLocal {
+                    viewModel.deleteVideo(video)
+                }
+                selectedVideoIDs.removeAll()
+                isSelectionMode = false
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will move the selected videos to Trash.")
+        }
         .onAppear {
+            // Scan for already downloaded videos
+            downloadManager.scanDownloadedVideos(in: viewModel.folderPath)
+            
             // Load aerial video sources if needed
             if downloadManager.sources.isEmpty {
                 downloadManager.loadSources {
@@ -438,6 +525,57 @@ struct VideoGridView: View {
             viewModel.reloadContent()
         }
     }
+    
+    @ViewBuilder
+    private func videoCard(for video: VideoItem, index: Int) -> some View {
+        let isSelected = selectedVideoIDs.contains(video.id)
+        
+        ZStack(alignment: .topLeading) {
+            if video.isRemote {
+                RemoteVideoThumbnailButton(video: video, action: {
+                    if isSelectionMode {
+                        toggleSelection(video.id)
+                    } else {
+                        onVideoSelect(video)
+                    }
+                }, folderPath: viewModel.folderPath, index: index)
+            } else {
+                VideoThumbnailButton(video: video, action: {
+                    if isSelectionMode {
+                        toggleSelection(video.id)
+                    } else {
+                        onVideoSelect(video)
+                    }
+                }, onDelete: {
+                    viewModel.deleteVideo(video)
+                })
+            }
+            
+            // Selection checkbox overlay
+            if isSelectionMode {
+                Button(action: { toggleSelection(video.id) }) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 24))
+                        .foregroundColor(isSelected ? .accentColor : .white)
+                        .shadow(radius: 2)
+                }
+                .buttonStyle(.plain)
+                .padding(8)
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
+        )
+    }
+    
+    private func toggleSelection(_ id: String) {
+        if selectedVideoIDs.contains(id) {
+            selectedVideoIDs.remove(id)
+        } else {
+            selectedVideoIDs.insert(id)
+        }
+    }
 }
 
 // MARK: - Remote Video Thumbnail Button (for streaming)
@@ -468,6 +606,10 @@ struct RemoteVideoThumbnailButton: View {
     
     private var isDownloading: Bool {
         downloadManager.downloadingIDs.contains(video.id)
+    }
+    
+    private var isWaiting: Bool {
+        downloadManager.waitingIDs.contains(video.id)
     }
     
     private var downloadProgress: Double {
@@ -516,13 +658,22 @@ struct RemoteVideoThumbnailButton: View {
             }
             .buttonStyle(.plain)
             
-            // Name and download button
-            HStack {
-                Text(video.filename)
-                    .font(.system(size: 11, weight: .medium))
+            // Name
+            Text(video.filename)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(2)
+                .foregroundColor(.primary)
+            
+            // Available qualities
+            if let qualities = video.availableQualities, !qualities.isEmpty {
+                Text(qualities.joined(separator: " · "))
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
                     .lineLimit(1)
-                    .foregroundColor(.primary)
-                
+            }
+            
+            // Download button
+            HStack {
                 Spacer()
                 
                 if isDownloading {
@@ -545,9 +696,30 @@ struct RemoteVideoThumbnailButton: View {
                         }
                     }
                     .buttonStyle(.plain)
+                } else if isWaiting {
+                    // Waiting in queue - spinning indicator
+                    Button(action: { downloadManager.cancelDownload(video.id) }) {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 2.5)
+                                .frame(width: 22, height: 22)
+                            
+                            ProgressView()
+                                .scaleEffect(0.6)
+                            
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Waiting in queue...")
                 } else {
                     Button(action: {
-                        downloadManager.downloadVideo(aerialVideo, quality: video.quality ?? "1080p-H264", to: folderPath)
+                        // Use original AerialVideo from downloadManager to preserve correct source
+                        if let originalVideo = downloadManager.videos.first(where: { $0.id == video.aerialId || $0.id == video.id }) {
+                            downloadManager.downloadVideo(originalVideo, quality: video.quality ?? "1080p-H264", to: folderPath)
+                        } else {
+                            // Fallback to reconstructed video
+                            downloadManager.downloadVideo(aerialVideo, quality: video.quality ?? "1080p-H264", to: folderPath)
+                        }
                     }) {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 20))
@@ -639,18 +811,48 @@ struct VideoThumbnailButton: View {
             .buttonStyle(.plain)
             
             // Video name
-            HStack {
-                Text(video.filename)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-                    .foregroundColor(.primary)
+            Text(video.filename)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(2)
+                .foregroundColor(.primary)
+            
+            // Action buttons row
+            HStack(spacing: 8) {
+                // Set as wallpaper
+                Button(action: action) {
+                    Image(systemName: "display")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+                .help("Set as Wallpaper")
+                
+                // Show in Finder
+                Button(action: {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: video.path)])
+                }) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("Show in Finder")
                 
                 Spacer()
                 
                 // Downloaded indicator
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 18))
+                    .font(.system(size: 14))
                     .foregroundColor(.green)
+                
+                // Delete button
+                Button(action: { showDeleteConfirmation = true }) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.red.opacity(0.8))
+                .help("Delete")
             }
         }
         .padding(6)
@@ -659,29 +861,6 @@ struct VideoThumbnailButton: View {
                 .fill(Color.gray.opacity(0.1))
         )
         .help(video.filename)
-        .contextMenu {
-            Button {
-                action()
-            } label: {
-                Label("Set as Wallpaper", systemImage: "display")
-            }
-
-            Divider()
-
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: video.path)])
-            } label: {
-                Label("Show in Finder", systemImage: "folder")
-            }
-
-            Divider()
-
-            Button(role: .destructive) {
-                showDeleteConfirmation = true
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
-        }
         .confirmationDialog("Delete \"\(video.filename)\"?", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
                 onDelete?()
@@ -1003,9 +1182,13 @@ struct VideoItem: Identifiable {
     var remoteURL: String?      // URL for streaming
     var thumbnailURL: String?   // URL for thumbnail generation (1080p-H264)
     var source: String = "Local" // Source (Local, macOS 26, tvOS 16, etc.)
+    var aerialId: String?       // Original Aerial video ID (for duplicate detection)
+    var duration: Double?       // Video duration in seconds
+    var description: String?    // Video description
+    var availableQualities: [String]? // List of available quality options
     
-    init(filename: String, path: String, thumbnailPath: String, quality: String? = nil, category: String = "Nature", isRemote: Bool = false, remoteURL: String? = nil, thumbnailURL: String? = nil, source: String = "Local") {
-        self.id = isRemote ? (remoteURL ?? UUID().uuidString) : UUID().uuidString
+    init(filename: String, path: String, thumbnailPath: String, quality: String? = nil, category: String = "Nature", isRemote: Bool = false, remoteURL: String? = nil, thumbnailURL: String? = nil, source: String = "Local", aerialId: String? = nil, duration: Double? = nil, description: String? = nil, availableQualities: [String]? = nil) {
+        self.id = aerialId ?? (isRemote ? (remoteURL ?? UUID().uuidString) : UUID().uuidString)
         self.filename = filename
         self.path = path
         self.thumbnailPath = thumbnailPath
@@ -1015,6 +1198,10 @@ struct VideoItem: Identifiable {
         self.remoteURL = remoteURL
         self.thumbnailURL = thumbnailURL
         self.source = source
+        self.aerialId = aerialId
+        self.duration = duration
+        self.description = description
+        self.availableQualities = availableQualities
     }
     
     func loadThumbnail() -> NSImage? {
@@ -1190,6 +1377,8 @@ class WallpaperViewModel: ObservableObject {
                    let metadata = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
                     item.source = metadata["source"] as? String ?? "Local"
                     item.category = metadata["category"] as? String ?? VideoItem.categorize(filename: f)
+                    item.aerialId = metadata["id"] as? String
+                    item.quality = metadata["quality"] as? String
                     // Use saved name if available
                     if let savedName = metadata["name"] as? String, !savedName.isEmpty {
                         item.filename = savedName
@@ -1231,6 +1420,10 @@ class WallpaperViewModel: ObservableObject {
             }
             // Also remove from slideshow if selected
             SlideshowManager.shared.removeVideo(path: video.path)
+            // Notify download manager to remove from downloaded IDs
+            if let aerialId = video.aerialId {
+                NotificationCenter.default.post(name: NSNotification.Name("VideoDeleted"), object: aerialId)
+            }
             // Reload content to update the grid
             reloadContent()
         } catch {
@@ -1851,7 +2044,13 @@ class SlideshowManager: ObservableObject {
             AerialVideoLoader.shared.loadIfNeeded()
             let quality = UserDefaults.standard.string(forKey: "streaming_quality") ?? "1080p-H264"
             let aerialVideos = AerialVideoLoader.shared.videos
+            let downloadedIDs = AerialDownloadManager.shared.downloadedVideoIDs
+            
             for video in aerialVideos {
+                // Skip if already downloaded (use local version instead)
+                if downloadedIDs.contains(video.id) {
+                    continue
+                }
                 // Filter by category
                 if !selectedCategories.contains(video.category) {
                     continue
@@ -2714,11 +2913,15 @@ class AerialDownloadManager: ObservableObject {
     @Published var isLoading = false
     @Published var isLoadingSources = false
     @Published var downloadProgress: [String: Double] = [:]
-    @Published var downloadingIDs: Set<String> = []
+    @Published var downloadingIDs: Set<String> = []  // Currently downloading
+    @Published var waitingIDs: Set<String> = []      // Waiting in queue
     @Published var errorMessage: String?
+    @Published var downloadedVideoIDs: Set<String> = []  // IDs of downloaded videos
 
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
     private var progressObservers: [String: NSKeyValueObservation] = [:]
+    private var downloadQueue: [(video: AerialVideo, quality: String, folderPath: String)] = []
+    private var isProcessingQueue = false
     
     // Default sources if manifest fails to load
     private let defaultSources: [AerialSource] = [
@@ -2766,6 +2969,41 @@ class AerialDownloadManager: ObservableObject {
     private init() {
         // Load default sources initially
         sources = defaultSources
+        
+        // Listen for video deletions to update downloadedVideoIDs
+        NotificationCenter.default.addObserver(forName: NSNotification.Name("VideoDeleted"), object: nil, queue: .main) { [weak self] notification in
+            if let videoId = notification.object as? String {
+                self?.downloadedVideoIDs.remove(videoId)
+            }
+        }
+    }
+    
+    /// Scan folder for downloaded video IDs from metadata files
+    func scanDownloadedVideos(in folderPath: String) {
+        var ids = Set<String>()
+        let fileManager = FileManager.default
+        
+        guard let files = try? fileManager.contentsOfDirectory(atPath: folderPath) else { return }
+        
+        for file in files {
+            guard file.hasSuffix(".json") else { continue }
+            let jsonPath = (folderPath as NSString).appendingPathComponent(file)
+            
+            if let data = fileManager.contents(atPath: jsonPath),
+               let metadata = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let videoId = metadata["id"] as? String {
+                ids.insert(videoId)
+            }
+        }
+        
+        DispatchQueue.main.async {
+            self.downloadedVideoIDs = ids
+        }
+    }
+    
+    /// Check if video is downloaded by ID
+    func isDownloadedByID(_ videoID: String) -> Bool {
+        return downloadedVideoIDs.contains(videoID)
     }
     
     func loadSources(completion: (() -> Void)? = nil) {
@@ -3142,7 +3380,32 @@ class AerialDownloadManager: ObservableObject {
         }
     }
 
+    /// Add video to download queue
     func downloadVideo(_ video: AerialVideo, quality: String = "4K-SDR", to folderPath: String) {
+        // Skip if already downloaded or in queue
+        if downloadedVideoIDs.contains(video.id) || downloadingIDs.contains(video.id) || waitingIDs.contains(video.id) {
+            return
+        }
+        
+        // Add to queue
+        downloadQueue.append((video, quality, folderPath))
+        waitingIDs.insert(video.id)
+        
+        // Start processing queue if not already
+        processDownloadQueue()
+    }
+    
+    private func processDownloadQueue() {
+        guard !isProcessingQueue, !downloadQueue.isEmpty else { return }
+        isProcessingQueue = true
+        
+        let (video, quality, folderPath) = downloadQueue.removeFirst()
+        waitingIDs.remove(video.id)
+        
+        startDownload(video: video, quality: quality, folderPath: folderPath)
+    }
+    
+    private func startDownload(video: AerialVideo, quality: String, folderPath: String) {
         let urlString: String?
         switch quality {
         case "4K-HDR":
@@ -3161,6 +3424,8 @@ class AerialDownloadManager: ObservableObject {
 
         guard let urlStr = urlString, let url = URL(string: urlStr) else {
             errorMessage = "No download URL available for \(quality)"
+            isProcessingQueue = false
+            processDownloadQueue()
             return
         }
 
@@ -3173,16 +3438,23 @@ class AerialDownloadManager: ObservableObject {
                 self?.downloadProgress.removeValue(forKey: video.id)
                 self?.downloadTasks.removeValue(forKey: video.id)
                 self?.progressObservers.removeValue(forKey: video.id)
+                self?.isProcessingQueue = false
             }
 
             if let error = error {
                 DispatchQueue.main.async {
                     self?.errorMessage = "Download failed: \(error.localizedDescription)"
+                    self?.processDownloadQueue()
                 }
                 return
             }
 
-            guard let tempURL = tempURL else { return }
+            guard let tempURL = tempURL else {
+                DispatchQueue.main.async {
+                    self?.processDownloadQueue()
+                }
+                return
+            }
 
             let filename = url.lastPathComponent
             let destURL = URL(fileURLWithPath: folderPath).appendingPathComponent(filename)
@@ -3208,17 +3480,22 @@ class AerialDownloadManager: ObservableObject {
                 }
 
                 DispatchQueue.main.async {
+                    // Add to downloaded IDs
+                    self?.downloadedVideoIDs.insert(video.id)
                     // Notify that download completed
                     NotificationCenter.default.post(name: NSNotification.Name("AerialVideoDownloaded"), object: nil)
+                    // Process next in queue
+                    self?.processDownloadQueue()
                 }
             } catch {
                 DispatchQueue.main.async {
                     self?.errorMessage = "Failed to save file: \(error.localizedDescription)"
+                    self?.processDownloadQueue()
                 }
             }
         }
 
-        // Track progress - save observation to prevent deallocation
+        // Track progress
         let observation = task.progress.observe(\.fractionCompleted, options: [.new, .initial]) { [weak self] progress, _ in
             let fraction = progress.fractionCompleted
             DispatchQueue.main.async {
@@ -3232,6 +3509,11 @@ class AerialDownloadManager: ObservableObject {
     }
 
     func cancelDownload(_ videoID: String) {
+        // Remove from queue if waiting
+        downloadQueue.removeAll { $0.video.id == videoID }
+        waitingIDs.remove(videoID)
+        
+        // Cancel active download
         downloadTasks[videoID]?.cancel()
         progressObservers[videoID]?.invalidate()
         downloadTasks.removeValue(forKey: videoID)
@@ -3241,6 +3523,12 @@ class AerialDownloadManager: ObservableObject {
     }
 
     func isDownloaded(_ video: AerialVideo, quality: String, in folderPath: String) -> Bool {
+        // Check by ID first (most reliable)
+        if downloadedVideoIDs.contains(video.id) {
+            return true
+        }
+        
+        // Fallback to file check
         let urlString: String?
         switch quality {
         case "4K-HDR":
