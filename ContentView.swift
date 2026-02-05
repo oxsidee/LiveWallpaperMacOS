@@ -52,7 +52,7 @@ struct ContentView: View {
 
             // Tabs
             TabView(selection: $selectedTab) {
-                // Downloaded videos tab
+                // Wallpapers tab (combined downloaded + aerial)
                 ZStack(alignment: .bottom) {
                     VideoGridView(
                         videos: viewModel.videos,
@@ -72,14 +72,14 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .tabItem {
-                    Label("Downloaded", systemImage: "folder.fill")
+                    Label("Wallpapers", systemImage: "photo.on.rectangle")
                 }
                 .tag(0)
                 
-                // Aerial download tab
-                AerialBrowserView(viewModel: viewModel)
+                // Slideshow tab
+                SlideshowTabView(viewModel: viewModel)
                     .tabItem {
-                        Label("Download", systemImage: "arrow.down.circle.fill")
+                        Label("Slideshow", systemImage: "play.rectangle.on.rectangle")
                     }
                     .tag(1)
             }
@@ -138,52 +138,458 @@ struct VideoGridView: View {
     let viewModel: WallpaperViewModel
     let onVideoSelect: (VideoItem) -> Void
     
-    private let columns = [GridItem(.adaptive(minimum: 250, maximum: 250), spacing: 2)]
+    @State private var selectedCategory: String = "All"
+    @State private var selectedSource: String = "All"
+    @StateObject private var downloadManager = AerialDownloadManager.shared
+    @State private var showAerialVideos = false
+    
+    private let columns = [GridItem(.adaptive(minimum: 200), spacing: 12)]
+    
+    private let allCategories = ["All", "Nature", "Cities", "Underwater", "Planet Earth", "Uploaded"]
+    
+    var availableSources: [String] {
+        var sources = Set(downloadManager.videos.map { $0.source })
+        // Add sources from local videos
+        sources.formUnion(videos.map { $0.source })
+        sources.remove("Local") // Will be added separately
+        return ["All", "Local"] + sources.sorted()
+    }
+    
+    var localVideosWithCategories: [VideoItem] {
+        videos  // source and category are already set in reloadContent
+    }
+    
+    var aerialVideosAsItems: [VideoItem] {
+        // Don't show streaming when Local filter is selected
+        guard showAerialVideos && selectedSource != "Local" else { return [] }
+        let quality = UserDefaults.standard.string(forKey: "streaming_quality") ?? "1080p-H264"
+        
+        // First filter by source
+        let sourceFilteredVideos: [AerialVideo]
+        if selectedSource == "All" {
+            sourceFilteredVideos = downloadManager.videos
+        } else {
+            sourceFilteredVideos = downloadManager.videos.filter { $0.source == selectedSource }
+        }
+        
+        let result = sourceFilteredVideos.compactMap { aerial -> VideoItem? in
+            guard let url = aerial.getURL(forQuality: quality) else { return nil }
+            // Skip if already downloaded
+            if downloadManager.isDownloaded(aerial, quality: quality, in: viewModel.folderPath) {
+                return nil
+            }
+            // Use 1080p-H264 for thumbnails (smallest/fastest), but the selected quality URL for playback
+            let thumbURL = aerial.url1080pH264 ?? aerial.url1080pSDR ?? aerial.url4KSDR
+            return VideoItem(
+                filename: aerial.name,
+                path: url,
+                thumbnailPath: "",
+                quality: quality,
+                category: aerial.category,
+                isRemote: true,
+                remoteURL: url,
+                thumbnailURL: thumbURL,
+                source: aerial.source
+            )
+        }
+        
+        return result
+    }
+    
+    var allVideos: [VideoItem] {
+        var result: [VideoItem] = []
+        
+        // Local videos
+        if selectedSource == "All" {
+            // Show all local videos
+            result = localVideosWithCategories
+        } else if selectedSource == "Local" {
+            // "Local" filter: show ALL local files regardless of their source
+            result = localVideosWithCategories
+        } else {
+            // Specific source: filter local videos by that source
+            result = localVideosWithCategories.filter { $0.source == selectedSource }
+        }
+        
+        // Aerial (streaming) videos: add when showAerialVideos is on and not "Local" filter
+        if showAerialVideos && selectedSource != "Local" {
+            result += aerialVideosAsItems
+        }
+        
+        return result
+    }
+    
+    var filteredVideos: [VideoItem] {
+        if selectedCategory == "All" {
+            return allVideos
+        }
+        return allVideos.filter { $0.category == selectedCategory }
+    }
+    
+    var groupedByCategory: [String: [VideoItem]] {
+        Dictionary(grouping: filteredVideos) { $0.category }
+    }
+    
+    var sortedCategories: [String] {
+        let order = ["Nature", "Cities", "Underwater", "Planet Earth", "Uploaded"]
+        return groupedByCategory.keys.sorted { a, b in
+            let aIndex = order.firstIndex(of: a) ?? 999
+            let bIndex = order.firstIndex(of: b) ?? 999
+            return aIndex < bIndex
+        }
+    }
     
     var body: some View {
-        ScrollView {
-            if videos.isEmpty {
-                Button {
+        VStack(spacing: 0) {
+            // Category filter bar
+            HStack(spacing: 8) {
+                ForEach(allCategories, id: \.self) { category in
+                    Button(action: { selectedCategory = category }) {
+                        Text(category)
+                            .font(.system(size: 12, weight: selectedCategory == category ? .bold : .regular))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(selectedCategory == category ? Color.accentColor : Color.gray.opacity(0.2))
+                            )
+                            .foregroundColor(selectedCategory == category ? .white : .primary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Spacer()
+                
+                // Upload video button
+                Button(action: uploadVideo) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 20))
+                    Text("Add")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+                
+                Toggle("Show Aerial", isOn: $showAerialVideos)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .onChange(of: showAerialVideos) { newValue in
+                        if newValue {
+                            AerialVideoLoader.shared.loadIfNeeded()
+                        }
+                    }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            
+            // Source filter (show when there are multiple sources in local or streaming videos)
+            if availableSources.count > 2 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(availableSources, id: \.self) { source in
+                            Button(action: { selectedSource = source }) {
+                                Text(source)
+                                    .font(.system(size: 11, weight: selectedSource == source ? .bold : .regular))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .fill(selectedSource == source ? Color.blue : Color.gray.opacity(0.15))
+                                    )
+                                    .foregroundColor(selectedSource == source ? .white : .primary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+                .padding(.bottom, 6)
+            }
+            
+            ScrollView {
+                if videos.isEmpty && !showAerialVideos {
+                    Button {
+                        let panel = NSOpenPanel()
+                        panel.canChooseFiles = false
+                        panel.canChooseDirectories = true
+                        panel.allowsMultipleSelection = false
+                        panel.title = "Select Wallpaper Folder"
+                        panel.prompt = "Choose"
+                        
+                        if panel.runModal() == .OK, let url = panel.url {
+                            viewModel.folderPath = url.path
+                            sharedEngine?.selctFolder(url.path())
+                            viewModel.reloadContent()
+                        }
+                    } label: {
+                        Text("Select a wallpaper folder")
+                            .font(.system(size: 14, weight: .medium))
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity, minHeight: 200)
+                } else if selectedCategory == "All" {
+                    // Show grouped by category
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(sortedCategories, id: \.self) { category in
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text(category)
+                                    .font(.headline)
+                                    .padding(.horizontal)
+                                
+                                LazyVGrid(columns: columns, spacing: 12) {
+                                    let categoryVideos = groupedByCategory[category] ?? []
+                                    ForEach(Array(categoryVideos.enumerated()), id: \.element.id) { idx, video in
+                                        if video.isRemote {
+                                            RemoteVideoThumbnailButton(video: video, action: {
+                                                onVideoSelect(video)
+                                            }, folderPath: viewModel.folderPath, index: idx)
+                                        } else {
+                                            VideoThumbnailButton(video: video, action: {
+                                                onVideoSelect(video)
+                                            }, onDelete: {
+                                                viewModel.deleteVideo(video)
+                                            })
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal)
+                            }
+                        }
+                    }
+                    .padding(.vertical)
+                } else {
+                    // Single category view
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(Array(filteredVideos.enumerated()), id: \.element.id) { idx, video in
+                            if video.isRemote {
+                                RemoteVideoThumbnailButton(video: video, action: {
+                                    onVideoSelect(video)
+                                }, folderPath: viewModel.folderPath, index: idx)
+                            } else {
+                                VideoThumbnailButton(video: video, action: {
+                                    onVideoSelect(video)
+                                }, onDelete: {
+                                    viewModel.deleteVideo(video)
+                                })
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 12)
+                }
+            }
+        }
+        .onAppear {
+            // Load aerial video sources if needed
+            if downloadManager.sources.isEmpty {
+                downloadManager.loadSources {
+                    if downloadManager.videos.isEmpty {
+                        downloadManager.loadVideos()
+                    }
+                }
+            } else if downloadManager.videos.isEmpty {
+                downloadManager.loadVideos()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("AerialVideoDownloaded"))) { _ in
+            viewModel.reloadContent()
+        }
+    }
+    
+    private func uploadVideo() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.movie, .video, .mpeg4Movie, .quickTimeMovie]
+        panel.title = "Select Video Files"
+        panel.prompt = "Add"
+        
+        if panel.runModal() == .OK {
+            for url in panel.urls {
+                let destURL = URL(fileURLWithPath: viewModel.folderPath).appendingPathComponent(url.lastPathComponent)
+                
+                do {
+                    // Remove if exists
+                    if FileManager.default.fileExists(atPath: destURL.path) {
+                        try FileManager.default.removeItem(at: destURL)
+                    }
+                    // Copy to wallpaper folder
+                    try FileManager.default.copyItem(at: url, to: destURL)
                     
-                    let panel = NSOpenPanel()
-                    panel.canChooseFiles = false
-                    panel.canChooseDirectories = true
-                    panel.allowsMultipleSelection = false
-                    panel.title = "Select Wallpaper Folder"
-                    panel.prompt = "Choose"
-                    
-                    if panel.runModal() == .OK, let url = panel.url {
-                        viewModel.folderPath = url.path
-                        sharedEngine?.selctFolder(url.path())
-                        viewModel.reloadContent()
+                    // Create metadata JSON for uploaded file
+                    let metadataURL = destURL.deletingPathExtension().appendingPathExtension("json")
+                    let metadata: [String: Any] = [
+                        "id": UUID().uuidString,
+                        "name": url.deletingPathExtension().lastPathComponent,
+                        "source": "Local",
+                        "category": "Uploaded",
+                        "quality": ""
+                    ]
+                    if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
+                        try? jsonData.write(to: metadataURL)
+                    }
+                } catch {
+                    NSLog("Failed to copy video: \(error.localizedDescription)")
+                }
+            }
+            viewModel.reloadContent()
+        }
+    }
+}
+
+// MARK: - Remote Video Thumbnail Button (for streaming)
+struct RemoteVideoThumbnailButton: View {
+    let video: VideoItem
+    let action: () -> Void
+    var folderPath: String = ""
+    var index: Int = 0  // For priority-based thumbnail loading
+    @StateObject private var thumbnailCache = AerialThumbnailCache.shared
+    @StateObject private var downloadManager = AerialDownloadManager.shared
+    @State private var thumbnail: NSImage?
+    
+    private var aerialVideo: AerialVideo {
+        let q = video.quality ?? "1080p-H264"
+        return AerialVideo(
+            id: video.id,
+            name: video.filename,
+            category: video.category,
+            source: video.source,
+            timeOfDay: "",
+            url4KSDR: q == "4K-SDR" ? video.remoteURL : nil,
+            url4KHDR: q == "4K-HDR" ? video.remoteURL : nil,
+            url1080pSDR: q == "1080p-SDR" ? video.remoteURL : nil,
+            url1080pHDR: q == "1080p-HDR" ? video.remoteURL : nil,
+            url1080pH264: q == "1080p-H264" ? video.remoteURL : video.thumbnailURL
+        )
+    }
+    
+    private var isDownloading: Bool {
+        downloadManager.downloadingIDs.contains(video.id)
+    }
+    
+    private var downloadProgress: Double {
+        downloadManager.downloadProgress[video.id] ?? 0
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: action) {
+                ZStack(alignment: .bottomTrailing) {
+                    if let thumbnail = thumbnail {
+                        Image(nsImage: thumbnail)
+                            .resizable()
+                            .aspectRatio(16/9, contentMode: .fill)
+                            .frame(height: 120)
+                            .clipped()
+                    } else {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.3))
+                            .frame(height: 120)
+                            .overlay {
+                                VStack(spacing: 4) {
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                }
+                            }
                     }
                     
-                } label: {
-                    Text("Select a wallpaper folder")
-                        .font(.system(size: 14, weight: .medium))
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity, minHeight: 200)
-            } else {
-                LazyVGrid(columns: columns, spacing: 2) {
-                    ForEach(videos) { video in
-                        VideoThumbnailButton(video: video, action: {
-                            onVideoSelect(video)
-                        }, onDelete: {
-                            viewModel.deleteVideo(video)
-                        })
-                        .id(video.id)
+                    // Stream badge
+                    HStack(spacing: 4) {
+                        Image(systemName: "wifi")
+                            .font(.system(size: 10))
+                        Text("Stream")
+                            .font(.system(size: 10, weight: .bold))
                     }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.blue.opacity(0.8))
+                    )
+                    .padding(6)
                 }
-                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: columns)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 12)
+                .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+            
+            // Name and download button
+            HStack {
+                Text(video.filename)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundColor(.primary)
+                
+                Spacer()
+                
+                if isDownloading {
+                    Button(action: { downloadManager.cancelDownload(video.id) }) {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 2.5)
+                                .frame(width: 22, height: 22)
+                            
+                            Circle()
+                                .trim(from: 0, to: downloadProgress)
+                                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                                .frame(width: 22, height: 22)
+                                .rotationEffect(.degrees(-90))
+                                .animation(.linear, value: downloadProgress)
+                            
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.accentColor)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: {
+                        downloadManager.downloadVideo(aerialVideo, quality: video.quality ?? "1080p-H264", to: folderPath)
+                    }) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(6)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.gray.opacity(0.1))
+        )
+        .help("\(video.filename) (Stream)")
+        .onAppear {
+            loadThumbnail()
+        }
+        .onDisappear {
+            // Cancel pending thumbnail request if not yet loaded
+            if thumbnail == nil {
+                thumbnailCache.cancelRequest(for: video.id)
             }
         }
     }
-
+    
+    private func loadThumbnail() {
+        // Use thumbnailURL if available, otherwise fall back to remoteURL
+        guard let thumbURL = video.thumbnailURL ?? video.remoteURL else { return }
+        // Create a temporary AerialVideo to use the thumbnail cache
+        let aerialVideo = AerialVideo(
+            id: video.id,
+            name: video.filename,
+            category: video.category,
+            source: "",
+            timeOfDay: "",
+            url1080pH264: thumbURL
+        )
+        thumbnailCache.getThumbnail(for: aerialVideo, quality: "1080p-H264", index: index) { image in
+            thumbnail = image
+        }
+    }
 }
 
 
@@ -196,41 +602,62 @@ struct VideoThumbnailButton: View {
     @State private var showDeleteConfirmation = false
 
     var body: some View {
-        Button(action: action) {
-            ZStack(alignment: .bottomTrailing) {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: action) {
+                ZStack(alignment: .bottomTrailing) {
 
-                let _ = cache.lastUpdate
+                    let _ = cache.lastUpdate
 
-                if let thumbnail = video.loadThumbnail() {
-                    Image(nsImage: thumbnail)
-                        .resizable()
-                        .aspectRatio(16/9, contentMode: .fill)
-                        .frame(height: 140)
-                        .clipped()
-                } else {
-                    Rectangle()
-                        .fill(Color.gray.opacity(0.3))
-                        .frame(height: 140)
-                        .overlay {
-                            VStack(spacing: 4) {
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                                Text("Generating...")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                    if let thumbnail = video.loadThumbnail() {
+                        Image(nsImage: thumbnail)
+                            .resizable()
+                            .aspectRatio(16/9, contentMode: .fill)
+                            .frame(height: 120)
+                            .clipped()
+                    } else {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.3))
+                            .frame(height: 120)
+                            .overlay {
+                                VStack(spacing: 4) {
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                    Text("Generating...")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
                             }
-                        }
-                }
+                    }
 
-                if let quality = video.quality, !quality.isEmpty {
-                    QualityBadge(text: quality)
-                        .padding(8)
+                    if let quality = video.quality, !quality.isEmpty {
+                        QualityBadge(text: quality)
+                            .padding(6)
+                    }
                 }
+                .cornerRadius(8)
             }
-            .cornerRadius(10)
+            .buttonStyle(.plain)
+            
+            // Video name
+            HStack {
+                Text(video.filename)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundColor(.primary)
+                
+                Spacer()
+                
+                // Downloaded indicator
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundColor(.green)
+            }
         }
-        .buttonStyle(.plain)
-        .padding(2)
+        .padding(6)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.gray.opacity(0.1))
+        )
         .help(video.filename)
         .contextMenu {
             Button {
@@ -466,85 +893,23 @@ struct SettingsView: View {
                         }
                     }
                     
+                    
                     Divider()
                     
-                    //Scale mode
-                    SettingRow(title: "Video Scaling Mode") {
+                    // Streaming Quality
+                    SettingRow(title: "Streaming Quality") {
                         Picker("", selection: Binding(
-                            get: {
-                                let mode = UserDefaults.standard.integer(forKey: "scale_mode")
-                                switch mode {
-                                case 0: return "fill"
-                                case 1: return "fit"
-                                case 2: return "stretch"
-                                case 3: return "center"
-                                case 4: return "height-fill"
-                                default: return "fill"
-                                }
-                            },
-                            set: { newValue in
-                                let intValue: Int
-                                switch newValue {
-                                case "fill": intValue = 0
-                                case "fit": intValue = 1
-                                case "stretch": intValue = 2
-                                case "center": intValue = 3
-                                case "height-fill": intValue = 4
-                                default: intValue = 0
-                                }
-                                UserDefaults.standard.set(intValue, forKey: "scale_mode")
-                            }
+                            get: { UserDefaults.standard.string(forKey: "streaming_quality") ?? "1080p-H264" },
+                            set: { UserDefaults.standard.set($0, forKey: "streaming_quality") }
                         )) {
-                            Text("Fill").tag("fill")
-                            Text("Fit").tag("fit")
-                            Text("Stretch").tag("stretch")
-                            Text("Center").tag("center")
-                            Text("HeightFill").tag("height-fill")
+                            Text("1080p H264").tag("1080p-H264")
+                            Text("1080p SDR").tag("1080p-SDR")
+                            Text("1080p HDR").tag("1080p-HDR")
+                            Text("4K SDR").tag("4K-SDR")
+                            Text("4K HDR").tag("4K-HDR")
                         }
                         .pickerStyle(.menu)
                         .frame(width: 150)
-                    }
-                    
-                    Divider()
-                    
-                    // Random Wallpaper on Startup
-                    SettingRow(title: "Random Wallpaper on Startup") {
-                        Toggle("", isOn: Binding(
-                                get: { UserDefaults.standard.bool(forKey: "random") },
-                                set: { UserDefaults.standard.set($0, forKey: "random") }
-                            ))
-                            .toggleStyle(.switch)
-
-                            
-                    }
-                    
-                    // Random Wallpaper on Weakup
-                    SettingRow(title: "Random Wallpaper on Lid Weakup (Required Application Restart)") {
-                        Toggle("", isOn: Binding(
-                                get: { UserDefaults.standard.bool(forKey: "random_lid") },
-                                set: { UserDefaults.standard.set($0, forKey: "random_lid") }
-                            ))
-                            .toggleStyle(.switch)
-
-                            
-                    }
-                    
-                    // Auto-Pause When App is Active
-                    SettingRow(title: "Pause When App is Active") {
-                        Toggle("", isOn: Binding(
-                                get: { UserDefaults.standard.bool(forKey: "pauseOnAppFocus") },
-                                set: { UserDefaults.standard.set($0, forKey: "pauseOnAppFocus") }
-                            ))
-                            .toggleStyle(.switch)
-                    }
-                    
-                    // Restart Dock on wallpaper change (for menu bar color)
-                    SettingRow(title: "Restart Dock on Wallpaper Change") {
-                        Toggle("", isOn: Binding(
-                                get: { UserDefaults.standard.bool(forKey: "restartDockOnWallpaperChange") },
-                                set: { UserDefaults.standard.set($0, forKey: "restartDockOnWallpaperChange") }
-                            ))
-                            .toggleStyle(.switch)
                     }
                     
                     Divider()
@@ -566,14 +931,6 @@ struct SettingsView: View {
                     }
                     
                     Divider()
-                    
-                    // Optimize Videos
-                    SettingRow(title: "Optimize Video Codecs") {
-                        Button("Optimize 🛠️") {
-                            viewModel.optimizeVideos()
-                        }
-                        .disabled(true) // Match original
-                    }
                     
                     // Clear Cache
                     SettingRow(title: "Clear Cache") {
@@ -636,14 +993,53 @@ struct SettingRow<Content: View>: View {
 }
 
 struct VideoItem: Identifiable {
-    let id = UUID()
-    let filename: String
+    let id: String
+    var filename: String  // Can be overwritten from metadata
     let path: String
     let thumbnailPath: String
     var quality: String?
+    var category: String = "Nature"
+    var isRemote: Bool = false  // True for streamable Aerial videos
+    var remoteURL: String?      // URL for streaming
+    var thumbnailURL: String?   // URL for thumbnail generation (1080p-H264)
+    var source: String = "Local" // Source (Local, macOS 26, tvOS 16, etc.)
+    
+    init(filename: String, path: String, thumbnailPath: String, quality: String? = nil, category: String = "Nature", isRemote: Bool = false, remoteURL: String? = nil, thumbnailURL: String? = nil, source: String = "Local") {
+        self.id = isRemote ? (remoteURL ?? UUID().uuidString) : UUID().uuidString
+        self.filename = filename
+        self.path = path
+        self.thumbnailPath = thumbnailPath
+        self.quality = quality
+        self.category = category
+        self.isRemote = isRemote
+        self.remoteURL = remoteURL
+        self.thumbnailURL = thumbnailURL
+        self.source = source
+    }
     
     func loadThumbnail() -> NSImage? {
         return ThumbnailCache.shared.image(for: thumbnailPath)
+    }
+    
+    static func categorize(filename: String) -> String {
+        let lower = filename.lowercased()
+        
+        if lower.contains("underwater") || lower.contains("sea") || lower.contains("ocean") || lower.contains("coral") || lower.contains("fish") || lower.contains("jellyfish") {
+            return "Underwater"
+        }
+        
+        let cities = ["new york", "dubai", "london", "san francisco", "hong kong", "los angeles", "tokyo", "chicago", "shanghai", "singapore", "city", "urban", "skyline", "downtown"]
+        for city in cities {
+            if lower.contains(city) {
+                return "Cities"
+            }
+        }
+        
+        if lower.contains("earth") || lower.contains("planet") || lower.contains("space") || lower.contains("iss") || lower.contains("aurora") {
+            return "Planet Earth"
+        }
+        
+        return "Nature"
     }
 }
 class ThumbnailCache: ObservableObject {
@@ -788,7 +1184,22 @@ class WallpaperViewModel: ObservableObject {
                 
                 var item = VideoItem(filename: f, path: full, thumbnailPath: thumbPath)
                 
-//                item.quality = self.engine.videoQualityBadge(for: URL(fileURLWithPath: full))
+                // Read metadata from JSON if exists
+                let metadataPath = (self.folderPath as NSString).appendingPathComponent("\(base).json")
+                if let jsonData = FileManager.default.contents(atPath: metadataPath),
+                   let metadata = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    item.source = metadata["source"] as? String ?? "Local"
+                    item.category = metadata["category"] as? String ?? VideoItem.categorize(filename: f)
+                    // Use saved name if available
+                    if let savedName = metadata["name"] as? String, !savedName.isEmpty {
+                        item.filename = savedName
+                    }
+                } else {
+                    // Unknown file (no metadata) - mark as Uploaded
+                    item.source = "Local"
+                    item.category = "Uploaded"
+                }
+                
                 self.engine.videoQualityBadge(for: URL(fileURLWithPath: full)){badge in item.quality = badge}
                 return item
             }
@@ -810,9 +1221,14 @@ class WallpaperViewModel: ObservableObject {
 
     func deleteVideo(_ video: VideoItem) {
         let fileURL = URL(fileURLWithPath: video.path)
+        let metadataURL = fileURL.deletingPathExtension().appendingPathExtension("json")
 
         do {
             try FileManager.default.trashItem(at: fileURL, resultingItemURL: nil)
+            // Also delete metadata JSON if exists
+            if FileManager.default.fileExists(atPath: metadataURL.path) {
+                try? FileManager.default.trashItem(at: metadataURL, resultingItemURL: nil)
+            }
             // Also remove from slideshow if selected
             SlideshowManager.shared.removeVideo(path: video.path)
             // Reload content to update the grid
@@ -843,10 +1259,6 @@ class WallpaperViewModel: ObservableObject {
         reloadContent()
     }
 
-    func optimizeVideos() {
-        engine.generateStaticWallpapers(forFolder: folderPath) {}
-    }
-
     private func getDisplayName(for id: CGDirectDisplayID) -> String {
         for s in NSScreen.screens {
             if let n = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
@@ -855,6 +1267,130 @@ class WallpaperViewModel: ObservableObject {
             }
         }
         return "Display \(id)"
+    }
+}
+
+// MARK: - Aerial Video Loader (singleton wrapper for accessing aerial videos)
+class AerialVideoLoader {
+    static let shared = AerialVideoLoader()
+    
+    var videos: [AerialVideo] {
+        return AerialDownloadManager.shared.videos
+    }
+    
+    func loadIfNeeded() {
+        if AerialDownloadManager.shared.videos.isEmpty && !AerialDownloadManager.shared.isLoading {
+            AerialDownloadManager.shared.loadSources { [weak self] in
+                AerialDownloadManager.shared.loadVideos()
+            }
+        }
+    }
+}
+
+// MARK: - Smart Randomizer
+class SmartRandomizer {
+    static let shared = SmartRandomizer()
+    
+    private var playedHistory: [String] = []
+    private let historyKey = "smart_random_history"
+    
+    private init() {
+        loadHistory()
+    }
+    
+    private func loadHistory() {
+        playedHistory = UserDefaults.standard.stringArray(forKey: historyKey) ?? []
+    }
+    
+    private func saveHistory() {
+        UserDefaults.standard.set(playedHistory, forKey: historyKey)
+    }
+    
+    func clearHistory() {
+        playedHistory.removeAll()
+        precomputedNextVideo = nil
+        saveHistory()
+    }
+    
+    /// Precomputed video for preloading
+    private var precomputedNextVideo: String?
+    
+    /// Get the next video, precomputing it if needed
+    func getNextVideo(from pool: [String]) -> String? {
+        // If we have a precomputed video and it's still in the pool, use it
+        if let precomputed = precomputedNextVideo, pool.contains(precomputed) {
+            precomputedNextVideo = nil
+            playedHistory.append(precomputed)
+            saveHistory()
+            return precomputed
+        }
+        
+        guard !pool.isEmpty else { return nil }
+        
+        // Filter out already played videos
+        let unplayed = pool.filter { !playedHistory.contains($0) }
+        
+        if unplayed.isEmpty {
+            // All videos played - reset history and start fresh
+            playedHistory.removeAll()
+            saveHistory()
+            let next = pool.randomElement()
+            if let next = next {
+                playedHistory.append(next)
+                saveHistory()
+            }
+            return next
+        }
+        
+        let next = unplayed.randomElement()!
+        playedHistory.append(next)
+        saveHistory()
+        return next
+    }
+    
+    /// Precompute the next video for preloading - returns the video that will be used next
+    func precomputeNextVideo(from pool: [String]) -> String? {
+        guard !pool.isEmpty else { return nil }
+        
+        // Don't recompute if already have one
+        if let existing = precomputedNextVideo, pool.contains(existing) {
+            return existing
+        }
+        
+        // Filter out already played videos
+        let unplayed = pool.filter { !playedHistory.contains($0) }
+        
+        let next: String?
+        if unplayed.isEmpty {
+            // All videos played - would start fresh
+            next = pool.randomElement()
+        } else {
+            next = unplayed.randomElement()
+        }
+        
+        precomputedNextVideo = next
+        return next
+    }
+    
+    func getVideoCategory(filename: String) -> String {
+        let lower = filename.lowercased()
+        
+        if lower.contains("underwater") || lower.contains("sea") || lower.contains("ocean") || lower.contains("coral") || lower.contains("fish") || lower.contains("jellyfish") {
+            return "Underwater"
+        }
+        
+        let cities = ["new york", "dubai", "london", "san francisco", "hong kong", "los angeles", "tokyo", "chicago", "shanghai", "singapore", "city", "urban", "skyline", "downtown"]
+        for city in cities {
+            if lower.contains(city) {
+                return "Cities"
+            }
+        }
+        
+        if lower.contains("earth") || lower.contains("planet") || lower.contains("space") || lower.contains("iss") || lower.contains("aurora") {
+            return "Planet Earth"
+        }
+        
+        return "Nature"
     }
 }
 
@@ -872,10 +1408,41 @@ class SlideshowManager: ObservableObject {
             }
         }
     }
+    
+    // Source mode: playlist (selected videos) or categories (random by category)
+    @Published var sourceMode: SourceMode = .playlist {
+        didSet {
+            UserDefaults.standard.set(sourceMode.rawValue, forKey: "slideshow_source_mode")
+            SmartRandomizer.shared.clearHistory()
+        }
+    }
 
     @Published var selectedVideoPaths: [String] = [] {
         didSet {
             UserDefaults.standard.set(selectedVideoPaths, forKey: "slideshow_videos")
+        }
+    }
+    
+    // Categories for category mode
+    @Published var selectedCategories: Set<String> = ["Nature", "Cities", "Underwater", "Planet Earth", "Uploaded"] {
+        didSet {
+            UserDefaults.standard.set(Array(selectedCategories), forKey: "slideshow_categories")
+            SmartRandomizer.shared.clearHistory()
+        }
+    }
+    
+    // Sources for category mode (macOS 26, tvOS 16, etc.)
+    @Published var selectedSources: Set<String> = [] {
+        didSet {
+            UserDefaults.standard.set(Array(selectedSources), forKey: "slideshow_sources")
+            SmartRandomizer.shared.clearHistory()
+        }
+    }
+    
+    @Published var onlyLocalVideos: Bool = true {
+        didSet {
+            UserDefaults.standard.set(onlyLocalVideos, forKey: "slideshow_only_local")
+            SmartRandomizer.shared.clearHistory()
         }
     }
 
@@ -947,6 +1514,18 @@ class SlideshowManager: ObservableObject {
             }
         }
     }
+    
+    enum SourceMode: String, CaseIterable {
+        case playlist = "playlist"
+        case categories = "categories"
+        
+        var displayName: String {
+            switch self {
+            case .playlist: return "Playlist"
+            case .categories: return "Categories"
+            }
+        }
+    }
 
     private init() {
         loadSettings()
@@ -969,9 +1548,34 @@ class SlideshowManager: ObservableObject {
            let mode = SwitchMode(rawValue: modeString) {
             switchMode = mode
         }
+        
+        // Load source mode settings
+        if let sourceModeString = UserDefaults.standard.string(forKey: "slideshow_source_mode"),
+           let mode = SourceMode(rawValue: sourceModeString) {
+            sourceMode = mode
+        }
+        
+        if let cats = UserDefaults.standard.stringArray(forKey: "slideshow_categories") {
+            selectedCategories = Set(cats)
+        }
+        
+        if let sources = UserDefaults.standard.stringArray(forKey: "slideshow_sources") {
+            selectedSources = Set(sources)
+        }
+        
+        onlyLocalVideos = UserDefaults.standard.object(forKey: "slideshow_only_local") as? Bool ?? true
 
-        if isEnabled && selectedVideoPaths.count >= 2 {
+        if isEnabled && canStart() {
             start()
+        }
+    }
+    
+    func canStart() -> Bool {
+        switch sourceMode {
+        case .playlist:
+            return selectedVideoPaths.count >= 2
+        case .categories:
+            return !selectedCategories.isEmpty && !buildVideoPool().isEmpty
         }
     }
 
@@ -1005,10 +1609,66 @@ class SlideshowManager: ObservableObject {
             nil,
             .deliverImmediately
         )
+        
+        // Listen for preload notification
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let manager = Unmanaged<SlideshowManager>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    manager.handlePreloadRequest()
+                }
+            },
+            "com.live.wallpaper.preloadNext" as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+    
+    private func handlePreloadRequest() {
+        guard isEnabled, canStart() else { return }
+        guard switchMode == .videoEndOnly || switchMode == .timerOrVideoEnd else { return }
+        
+        NSLog("[Slideshow] Preload requested, determining next video")
+        
+        let pool = buildVideoPool()
+        guard !pool.isEmpty else { return }
+        
+        // Get displays
+        sharedEngine?.scanDisplays()
+        let displays = sharedEngine?.getDisplays() as? [DisplayObjc] ?? []
+        guard !displays.isEmpty else { return }
+        
+        // Precompute the next video
+        let nextVideo = SmartRandomizer.shared.precomputeNextVideo(from: pool)
+        
+        guard let videoPath = nextVideo else { return }
+        
+        // Set preload path for each display daemon
+        let defaults = UserDefaults.standard
+        for display in displays {
+            let key = "PreloadVideo_\(display.screen)"
+            defaults.set(videoPath, forKey: key)
+        }
+        defaults.synchronize()
+        
+        // Notify daemons to preload
+        let notificationName = CFNotificationName("com.live.wallpaper.preloadVideo" as CFString)
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            notificationName,
+            nil,
+            nil,
+            true
+        )
+        
+        NSLog("[Slideshow] Preload triggered for: \(videoPath)")
     }
     
     private func handleVideoEnd() {
-        guard isEnabled, selectedVideoPaths.count >= 2 else { return }
+        guard isEnabled, canStart() else { return }
         guard switchMode == .videoEndOnly || switchMode == .timerOrVideoEnd else { return }
         
         // Debounce: several daemons (displays) can post at once
@@ -1027,7 +1687,7 @@ class SlideshowManager: ObservableObject {
     
     private func start() {
         stop()
-        guard selectedVideoPaths.count >= 2 else { return }
+        guard canStart() else { return }
         
         if switchMode == .timerOnly || switchMode == .timerOrVideoEnd {
             startTimer()
@@ -1040,7 +1700,7 @@ class SlideshowManager: ObservableObject {
 
     private func startTimer() {
         stopTimer()
-        guard selectedVideoPaths.count >= 2 else { return }
+        guard canStart() else { return }
 
         let interval = intervalValue * intervalUnit.multiplier
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
@@ -1049,7 +1709,7 @@ class SlideshowManager: ObservableObject {
     }
     
     private func handleTimerFired() {
-        guard isEnabled, selectedVideoPaths.count >= 2 else { return }
+        guard isEnabled, canStart() else { return }
         guard switchMode == .timerOnly || switchMode == .timerOrVideoEnd else { return }
         
         NSLog("[Slideshow] Timer fired, switching wallpaper")
@@ -1087,27 +1747,126 @@ class SlideshowManager: ObservableObject {
         selectedVideoPaths.removeAll()
     }
 
+    /// Public method to switch to next wallpaper (called from tray menu)
+    func switchToNextWallpaper() {
+        sharedEngine?.scanDisplays()
+        let displays = sharedEngine?.getDisplays() as? [DisplayObjc] ?? []
+        
+        // Use the same pool as slideshow
+        let pool = buildVideoPool()
+        guard !pool.isEmpty else { return }
+        
+        if syncDisplays {
+            guard let videoPath = SmartRandomizer.shared.getNextVideo(from: pool) else { return }
+            let displayIDs = displays.map { NSNumber(value: $0.screen) }
+            sharedEngine?.transition(toVideo: videoPath, onDisplays: displayIDs)
+        } else {
+            for display in displays {
+                guard let videoPath = SmartRandomizer.shared.getNextVideo(from: pool) else { continue }
+                sharedEngine?.transition(toVideo: videoPath, onDisplays: [NSNumber(value: display.screen)])
+            }
+        }
+    }
+
     private func switchWallpaper() {
-        guard selectedVideoPaths.count >= 2 else { return }
+        // Build video pool based on source mode
+        let pool = buildVideoPool()
+        guard !pool.isEmpty else { return }
 
         sharedEngine?.scanDisplays()
         let displays = sharedEngine?.getDisplays() as? [DisplayObjc] ?? []
 
         if syncDisplays {
-            // Same wallpaper on all monitors with smooth crossfade
-            let randomIndex = Int.random(in: 0..<selectedVideoPaths.count)
-            let videoPath = selectedVideoPaths[randomIndex]
+            // Same wallpaper on all monitors with smooth crossfade using smart randomizer
+            guard let videoPath = SmartRandomizer.shared.getNextVideo(from: pool) else { return }
 
             let displayIDs = displays.map { NSNumber(value: $0.screen) }
             sharedEngine?.transition(toVideo: videoPath, onDisplays: displayIDs)
         } else {
-            // Different wallpaper on each monitor with smooth crossfade
+            // Different wallpaper on each monitor with smooth crossfade using smart randomizer
             for display in displays {
-                let randomIndex = Int.random(in: 0..<selectedVideoPaths.count)
-                let videoPath = selectedVideoPaths[randomIndex]
+                guard let videoPath = SmartRandomizer.shared.getNextVideo(from: pool) else { continue }
                 sharedEngine?.transition(toVideo: videoPath, onDisplays: [NSNumber(value: display.screen)])
             }
         }
+    }
+    
+    /// Build video pool based on current source mode
+    func buildVideoPool() -> [String] {
+        switch sourceMode {
+        case .playlist:
+            return selectedVideoPaths
+        case .categories:
+            return buildCategoryPool()
+        }
+    }
+    
+    private func buildCategoryPool() -> [String] {
+        var pool: [String] = []
+        
+        // Get folder path for local videos
+        guard let folderPath = sharedEngine?.getFolderPath() else { return pool }
+        
+        // Local videos (only if no sources selected OR "Local" is selected)
+        if selectedSources.isEmpty || selectedSources.contains("Local") {
+            let fileManager = FileManager.default
+            if let files = try? fileManager.contentsOfDirectory(atPath: folderPath) {
+                for file in files {
+                    let ext = (file as NSString).pathExtension.lowercased()
+                    if ext == "mp4" || ext == "mov" {
+                        let fullPath = (folderPath as NSString).appendingPathComponent(file)
+                        let base = (file as NSString).deletingPathExtension
+                        
+                        // Read category from metadata JSON if exists
+                        var category: String
+                        var source: String = "Local"
+                        let metadataPath = (folderPath as NSString).appendingPathComponent("\(base).json")
+                        if let jsonData = fileManager.contents(atPath: metadataPath),
+                           let metadata = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                            category = metadata["category"] as? String ?? "Uploaded"
+                            source = metadata["source"] as? String ?? "Local"
+                        } else {
+                            // No metadata = uploaded file
+                            category = "Uploaded"
+                        }
+                        
+                        // Filter by category
+                        if !selectedCategories.contains(category) {
+                            continue
+                        }
+                        
+                        // Filter by source (if sources are selected and not "Local")
+                        if !selectedSources.isEmpty && !selectedSources.contains("Local") && !selectedSources.contains(source) {
+                            continue
+                        }
+                        
+                        pool.append(fullPath)
+                    }
+                }
+            }
+        }
+        
+        // Remote videos (if not only local)
+        if !onlyLocalVideos {
+            AerialVideoLoader.shared.loadIfNeeded()
+            let quality = UserDefaults.standard.string(forKey: "streaming_quality") ?? "1080p-H264"
+            let aerialVideos = AerialVideoLoader.shared.videos
+            for video in aerialVideos {
+                // Filter by category
+                if !selectedCategories.contains(video.category) {
+                    continue
+                }
+                // Filter by source (if sources are selected)
+                if !selectedSources.isEmpty && !selectedSources.contains(video.source) {
+                    continue
+                }
+                if let url = video.getURL(forQuality: quality) {
+                    pool.append(url)
+                }
+            }
+        }
+        
+        return pool
     }
 
     func getThumbnailPath(for videoPath: String) -> String {
@@ -1145,7 +1904,18 @@ struct SlideshowView: View {
             SettingRow(title: "Enable Slideshow") {
                 Toggle("", isOn: $slideshowManager.isEnabled)
                     .toggleStyle(.switch)
-                    .disabled(slideshowManager.selectedVideoPaths.count < 2)
+                    .disabled(!slideshowManager.canStart())
+            }
+            
+            // Source mode (Playlist vs Categories)
+            SettingRow(title: "Source") {
+                Picker("", selection: $slideshowManager.sourceMode) {
+                    ForEach(SlideshowManager.SourceMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 200)
             }
 
             // Switch mode
@@ -1190,98 +1960,142 @@ struct SlideshowView: View {
 
             Divider()
 
-            // Selected wallpapers section
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Selected Wallpapers")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(slideshowManager.selectedVideoPaths.count) wallpapers")
-                        .foregroundColor(.secondary)
-                }
+            // Source-specific settings
+            if slideshowManager.sourceMode == .playlist {
+                // Selected wallpapers section (Playlist mode)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Selected Wallpapers")
+                            .font(.headline)
+                        Spacer()
+                        Text("\(slideshowManager.selectedVideoPaths.count) wallpapers")
+                            .foregroundColor(.secondary)
+                    }
 
-                // Drop zone
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(isDropTargeted ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.1))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .strokeBorder(
-                                    isDropTargeted ? Color.accentColor : Color.gray.opacity(0.3),
-                                    style: StrokeStyle(lineWidth: 2, dash: [8])
-                                )
-                        )
-
-                    if slideshowManager.selectedVideoPaths.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "photo.on.rectangle.angled")
-                                .font(.system(size: 40))
-                                .foregroundColor(.secondary)
-                            Text("Drag & drop wallpapers here")
-                                .foregroundColor(.secondary)
-                            Text("or select from the list below")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    } else {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                ForEach(slideshowManager.selectedVideoPaths, id: \.self) { path in
-                                    SlideshowThumbnailView(
-                                        path: path,
-                                        thumbnailPath: slideshowManager.getThumbnailPath(for: path),
-                                        onRemove: {
-                                            slideshowManager.removeVideo(path: path)
-                                        }
+                    // Drop zone
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(isDropTargeted ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.1))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .strokeBorder(
+                                        isDropTargeted ? Color.accentColor : Color.gray.opacity(0.3),
+                                        style: StrokeStyle(lineWidth: 2, dash: [8])
                                     )
-                                }
+                            )
+
+                        if slideshowManager.selectedVideoPaths.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "photo.on.rectangle.angled")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(.secondary)
+                                Text("Drag & drop wallpapers here")
+                                    .foregroundColor(.secondary)
+                                Text("or select from the list below")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
-                            .padding(8)
-                        }
-                    }
-                }
-                .frame(height: 140)
-                .onDrop(of: [.fileURL, .text], isTargeted: $isDropTargeted) { providers in
-                    handleDrop(providers: providers)
-                }
-
-                HStack {
-                    Button("Clear All") {
-                        slideshowManager.clearAll()
-                    }
-                    .disabled(slideshowManager.selectedVideoPaths.isEmpty)
-
-                    Spacer()
-                }
-            }
-
-            Divider()
-
-            // Available wallpapers to add
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Available Wallpapers (click to add)")
-                    .font(.headline)
-
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 8) {
-                        ForEach(viewModel.videos) { video in
-                            SlideshowAvailableVideoView(
-                                video: video,
-                                isSelected: slideshowManager.selectedVideoPaths.contains(video.path),
-                                onTap: {
-                                    if slideshowManager.selectedVideoPaths.contains(video.path) {
-                                        slideshowManager.removeVideo(path: video.path)
-                                    } else {
-                                        slideshowManager.addVideo(path: video.path)
+                        } else {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(slideshowManager.selectedVideoPaths, id: \.self) { path in
+                                        SlideshowThumbnailView(
+                                            path: path,
+                                            thumbnailPath: slideshowManager.getThumbnailPath(for: path),
+                                            onRemove: {
+                                                slideshowManager.removeVideo(path: path)
+                                            }
+                                        )
                                     }
                                 }
-                            )
+                                .padding(8)
+                            }
                         }
                     }
-                    .padding(.horizontal, 4)
+                    .frame(height: 140)
+                    .onDrop(of: [.fileURL, .text], isTargeted: $isDropTargeted) { providers in
+                        handleDrop(providers: providers)
+                    }
+
+                    HStack {
+                        Button("Clear All") {
+                            slideshowManager.clearAll()
+                        }
+                        .disabled(slideshowManager.selectedVideoPaths.isEmpty)
+
+                        Spacer()
+                    }
+                }
+
+                Divider()
+
+                // Available wallpapers to add
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Available Wallpapers (click to add)")
+                        .font(.headline)
+
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 8) {
+                            ForEach(viewModel.videos) { video in
+                                SlideshowAvailableVideoView(
+                                    video: video,
+                                    isSelected: slideshowManager.selectedVideoPaths.contains(video.path),
+                                    onTap: {
+                                        if slideshowManager.selectedVideoPaths.contains(video.path) {
+                                            slideshowManager.removeVideo(path: video.path)
+                                        } else {
+                                            slideshowManager.addVideo(path: video.path)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                    }
+                }
+                .frame(maxHeight: 200)
+            } else {
+                // Categories mode settings
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Select Categories")
+                        .font(.headline)
+                    
+                    let allCategories = ["Nature", "Cities", "Underwater", "Planet Earth", "Uploaded"]
+                    
+                    ForEach(allCategories, id: \.self) { category in
+                        HStack {
+                            Toggle(category, isOn: Binding(
+                                get: { slideshowManager.selectedCategories.contains(category) },
+                                set: { enabled in
+                                    if enabled {
+                                        slideshowManager.selectedCategories.insert(category)
+                                    } else {
+                                        slideshowManager.selectedCategories.remove(category)
+                                    }
+                                }
+                            ))
+                            Spacer()
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    SettingRow(title: "Only local videos") {
+                        Toggle("", isOn: $slideshowManager.onlyLocalVideos)
+                            .toggleStyle(.switch)
+                    }
+                    Text("When disabled, streaming videos from internet will be included")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 200)
+                    
+                    // Show video count
+                    let pool = slideshowManager.buildVideoPool()
+                    Text("\(pool.count) videos available in selected categories")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
-            .frame(maxHeight: 200)
         }
         .padding()
         .frame(width: 550, height: 650)
@@ -1289,6 +2103,291 @@ struct SlideshowView: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
     }
 
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier("public.file-url") {
+                provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, _ in
+                    if let data = item as? Data,
+                       let url = URL(dataRepresentation: data, relativeTo: nil),
+                       ["mp4", "mov"].contains(url.pathExtension.lowercased()) {
+                        DispatchQueue.main.async {
+                            slideshowManager.addVideo(path: url.path)
+                        }
+                    }
+                }
+            }
+        }
+        return true
+    }
+}
+
+// MARK: - Slideshow Tab View (for main window tab)
+struct SlideshowTabView: View {
+    @ObservedObject var slideshowManager = SlideshowManager.shared
+    @ObservedObject var viewModel: WallpaperViewModel
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Enable toggle
+                SettingRow(title: "Enable Slideshow") {
+                    Toggle("", isOn: $slideshowManager.isEnabled)
+                        .toggleStyle(.switch)
+                        .disabled(!slideshowManager.canStart())
+                }
+                
+                // Source mode (Playlist vs Categories)
+                SettingRow(title: "Source") {
+                    Picker("", selection: $slideshowManager.sourceMode) {
+                        ForEach(SlideshowManager.SourceMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 200)
+                }
+
+                // Switch mode
+                SettingRow(title: "Switch mode") {
+                    Picker("", selection: $slideshowManager.switchMode) {
+                        ForEach(SlideshowManager.SwitchMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 160)
+                }
+                
+                // Interval settings (only show if timer is used)
+                if slideshowManager.switchMode != .videoEndOnly {
+                    SettingRow(title: "Switch every") {
+                        HStack {
+                            TextField("", value: $slideshowManager.intervalValue, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 80)
+
+                            Picker("", selection: $slideshowManager.intervalUnit) {
+                                ForEach(SlideshowManager.IntervalUnit.allCases, id: \.self) { unit in
+                                    Text(unit.displayName).tag(unit)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 100)
+                        }
+                    }
+                }
+
+                // Sync displays toggle
+                SettingRow(title: "Sync displays") {
+                    Toggle("", isOn: $slideshowManager.syncDisplays)
+                        .toggleStyle(.switch)
+                }
+                Text("When enabled, all monitors show the same wallpaper")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 200)
+
+                Divider()
+
+                // Source-specific settings
+                if slideshowManager.sourceMode == .playlist {
+                    playlistModeContent
+                } else {
+                    categoriesModeContent
+                }
+            }
+            .padding(24)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    @ViewBuilder
+    private var playlistModeContent: some View {
+        // Selected wallpapers section (Playlist mode)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Selected Wallpapers")
+                    .font(.headline)
+                Spacer()
+                Text("\(slideshowManager.selectedVideoPaths.count) wallpapers")
+                    .foregroundColor(.secondary)
+            }
+
+            // Drop zone
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(isDropTargeted ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.1))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(
+                                isDropTargeted ? Color.accentColor : Color.gray.opacity(0.3),
+                                style: StrokeStyle(lineWidth: 2, dash: [8])
+                            )
+                    )
+
+                if slideshowManager.selectedVideoPaths.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 40))
+                            .foregroundColor(.secondary)
+                        Text("Drag & drop wallpapers here")
+                            .foregroundColor(.secondary)
+                        Text("or select from the list below")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(slideshowManager.selectedVideoPaths, id: \.self) { path in
+                                SlideshowThumbnailView(
+                                    path: path,
+                                    thumbnailPath: slideshowManager.getThumbnailPath(for: path),
+                                    onRemove: {
+                                        slideshowManager.removeVideo(path: path)
+                                    }
+                                )
+                            }
+                        }
+                        .padding(8)
+                    }
+                }
+            }
+            .frame(height: 140)
+            .onDrop(of: [.fileURL, .text], isTargeted: $isDropTargeted) { providers in
+                handleDrop(providers: providers)
+            }
+
+            HStack {
+                Button("Clear All") {
+                    slideshowManager.clearAll()
+                }
+                .disabled(slideshowManager.selectedVideoPaths.isEmpty)
+
+                Spacer()
+            }
+        }
+
+        Divider()
+
+        // Available wallpapers to add
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Available Wallpapers (click to add)")
+                .font(.headline)
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 8) {
+                ForEach(viewModel.videos) { video in
+                    SlideshowAvailableVideoView(
+                        video: video,
+                        isSelected: slideshowManager.selectedVideoPaths.contains(video.path),
+                        onTap: {
+                            if slideshowManager.selectedVideoPaths.contains(video.path) {
+                                slideshowManager.removeVideo(path: video.path)
+                            } else {
+                                slideshowManager.addVideo(path: video.path)
+                            }
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal, 4)
+        }
+    }
+    
+    @ViewBuilder
+    private var categoriesModeContent: some View {
+        // Categories mode settings
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Select Categories")
+                .font(.headline)
+            
+            let allCategories = ["Nature", "Cities", "Underwater", "Planet Earth", "Uploaded"]
+            
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], spacing: 8) {
+                ForEach(allCategories, id: \.self) { category in
+                    Toggle(category, isOn: Binding(
+                        get: { slideshowManager.selectedCategories.contains(category) },
+                        set: { enabled in
+                            if enabled {
+                                slideshowManager.selectedCategories.insert(category)
+                            } else {
+                                slideshowManager.selectedCategories.remove(category)
+                            }
+                        }
+                    ))
+                    .toggleStyle(.checkbox)
+                }
+            }
+            
+            Divider()
+            
+            SettingRow(title: "Only local videos") {
+                Toggle("", isOn: $slideshowManager.onlyLocalVideos)
+                    .toggleStyle(.switch)
+            }
+            Text("When disabled, streaming videos from internet will be included")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.leading, 200)
+            
+            // Source selection (only when not local-only)
+            if !slideshowManager.onlyLocalVideos {
+                Divider()
+                
+                Text("Select Sources")
+                    .font(.headline)
+                
+                let availableSources = Array(Set(AerialDownloadManager.shared.videos.map { $0.source })).sorted()
+                let allSourceOptions = ["Local"] + availableSources
+                
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 8) {
+                    ForEach(allSourceOptions, id: \.self) { source in
+                        Toggle(source, isOn: Binding(
+                            get: { 
+                                slideshowManager.selectedSources.isEmpty || slideshowManager.selectedSources.contains(source) 
+                            },
+                            set: { enabled in
+                                // If currently empty (all selected), populate with all then remove unchecked
+                                if slideshowManager.selectedSources.isEmpty && !enabled {
+                                    slideshowManager.selectedSources = Set(allSourceOptions)
+                                    slideshowManager.selectedSources.remove(source)
+                                } else if enabled {
+                                    slideshowManager.selectedSources.insert(source)
+                                    // If all are now selected, clear the set (means "all")
+                                    if slideshowManager.selectedSources == Set(allSourceOptions) {
+                                        slideshowManager.selectedSources.removeAll()
+                                    }
+                                } else {
+                                    slideshowManager.selectedSources.remove(source)
+                                }
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                    }
+                }
+                
+                Text("All checked = all sources included")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Divider()
+            
+            // Show video count
+            let pool = slideshowManager.buildVideoPool()
+            Text("\(pool.count) videos available")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .onAppear {
+            // Load aerial videos for source list
+            if AerialDownloadManager.shared.videos.isEmpty {
+                AerialDownloadManager.shared.loadVideos()
+            }
+        }
+    }
+    
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier("public.file-url") {
@@ -1395,6 +2494,22 @@ struct AerialVideo: Identifiable {
     var url1080pSDR: String?
     var url1080pHDR: String?
     var url1080pH264: String?
+    
+    func getURL(forQuality quality: String) -> String? {
+        // First try the requested quality
+        let preferred: String? = {
+            switch quality {
+            case "4K-SDR": return url4KSDR
+            case "4K-HDR": return url4KHDR
+            case "1080p-SDR": return url1080pSDR
+            case "1080p-HDR": return url1080pHDR
+            case "1080p-H264": return url1080pH264
+            default: return nil
+            }
+        }()
+        // Fallback to any available URL if preferred not available
+        return preferred ?? url1080pH264 ?? url1080pSDR ?? url4KSDR ?? url4KHDR ?? url1080pHDR
+    }
 }
 
 // MARK: - Aerial JSON Structure
@@ -1461,15 +2576,26 @@ class AerialThumbnailCache: ObservableObject {
     private let cache = NSCache<NSString, NSImage>()
     private var loading: Set<String> = []
     private let maxConcurrentLoads = 3
-    private var pendingRequests: [(AerialVideo, String, (NSImage?) -> Void)] = []
+    private var pendingRequests: [(video: AerialVideo, quality: String, index: Int, completion: (NSImage?) -> Void)] = []
+    private var cancelledRequests: Set<String> = []
     
     private init() {
         cache.countLimit = 50
         cache.totalCostLimit = 30 * 1024 * 1024 // 30MB limit for aerial thumbnails
     }
     
-    func getThumbnail(for video: AerialVideo, quality: String = "1080p-SDR", completion: @escaping (NSImage?) -> Void) {
+    /// Cancel a pending request when view disappears
+    func cancelRequest(for videoId: String) {
+        cancelledRequests.insert(videoId)
+        pendingRequests.removeAll { $0.video.id == videoId }
+    }
+    
+    /// Get thumbnail with index for priority ordering (lower index = higher priority)
+    func getThumbnail(for video: AerialVideo, quality: String = "1080p-SDR", index: Int = Int.max, completion: @escaping (NSImage?) -> Void) {
         let cacheKey = "\(video.id)-\(quality)"
+        
+        // Remove from cancelled if re-requested
+        cancelledRequests.remove(video.id)
         
         if let cached = cache.object(forKey: cacheKey as NSString) {
             completion(cached)
@@ -1482,7 +2608,9 @@ class AerialThumbnailCache: ObservableObject {
         
         // Limit concurrent loads to reduce network/CPU pressure
         if loading.count >= maxConcurrentLoads {
-            pendingRequests.append((video, quality, completion))
+            // Insert sorted by index (top-to-bottom order)
+            let insertIndex = pendingRequests.firstIndex { $0.index > index } ?? pendingRequests.count
+            pendingRequests.insert((video, quality, index, completion), at: insertIndex)
             return
         }
         
@@ -1546,9 +2674,19 @@ class AerialThumbnailCache: ObservableObject {
     }
     
     private func processNextPending() {
+        // Skip cancelled requests
+        while !pendingRequests.isEmpty && cancelledRequests.contains(pendingRequests.first!.video.id) {
+            pendingRequests.removeFirst()
+        }
+        
         guard !pendingRequests.isEmpty, loading.count < maxConcurrentLoads else { return }
-        let (video, quality, completion) = pendingRequests.removeFirst()
-        getThumbnail(for: video, quality: quality, completion: completion)
+        let request = pendingRequests.removeFirst()
+        getThumbnail(for: request.video, quality: request.quality, index: request.index, completion: request.completion)
+    }
+    
+    /// Clean up cancelled requests periodically
+    func cleanupCancelled() {
+        cancelledRequests.removeAll()
     }
 }
 
@@ -2054,6 +3192,20 @@ class AerialDownloadManager: ObservableObject {
                     try FileManager.default.removeItem(at: destURL)
                 }
                 try FileManager.default.moveItem(at: tempURL, to: destURL)
+                
+                // Save metadata JSON
+                let metadataURL = destURL.deletingPathExtension().appendingPathExtension("json")
+                let metadata: [String: Any] = [
+                    "id": video.id,
+                    "name": video.name,
+                    "source": video.source,
+                    "category": video.category,
+                    "timeOfDay": video.timeOfDay,
+                    "quality": quality
+                ]
+                if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
+                    try? jsonData.write(to: metadataURL)
+                }
 
                 DispatchQueue.main.async {
                     // Notify that download completed
@@ -2221,7 +3373,8 @@ struct AerialBrowserView: View {
                                     .padding(.horizontal)
                                 
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 200))], spacing: 12) {
-                                    ForEach(groupedByCategory[category] ?? []) { video in
+                                    let categoryVideos = groupedByCategory[category] ?? []
+                                    ForEach(Array(categoryVideos.enumerated()), id: \.element.id) { idx, video in
                                         AerialVideoCard(
                                             video: video,
                                             quality: selectedQuality,
@@ -2233,7 +3386,8 @@ struct AerialBrowserView: View {
                                             },
                                             onCancel: {
                                                 downloadManager.cancelDownload(video.id)
-                                            }
+                                            },
+                                            index: idx
                                         )
                                     }
                                 }
@@ -2272,6 +3426,7 @@ struct AerialVideoCard: View {
     let progress: Double
     let onDownload: () -> Void
     let onCancel: () -> Void
+    var index: Int = 0  // For priority-based thumbnail loading
     
     @StateObject private var thumbnailCache = AerialThumbnailCache.shared
     @State private var thumbnail: NSImage?
@@ -2326,6 +3481,11 @@ struct AerialVideoCard: View {
             .cornerRadius(8)
             .onAppear {
                 loadThumbnail()
+            }
+            .onDisappear {
+                if thumbnail == nil {
+                    thumbnailCache.cancelRequest(for: video.id)
+                }
             }
             .onChange(of: quality) { _ in
                 thumbnail = nil
@@ -2388,7 +3548,7 @@ struct AerialVideoCard: View {
     }
     
     private func loadThumbnail() {
-        thumbnailCache.getThumbnail(for: video, quality: quality) { image in
+        thumbnailCache.getThumbnail(for: video, quality: quality, index: index) { image in
             thumbnail = image
         }
     }

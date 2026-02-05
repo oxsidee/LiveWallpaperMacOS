@@ -58,6 +58,9 @@
 @property(nonatomic, assign) NSTimeInterval videoDuration;
 @property(nonatomic, strong) id loopEndTimeObserver;
 @property(nonatomic, assign) BOOL didFireEndNotificationThisLoop;
+@property(nonatomic, assign) BOOL didFirePreloadNotificationThisLoop;
+@property(nonatomic, strong) AVPlayerItem *preloadedItem;
+@property(nonatomic, strong) NSString *preloadedVideoPath;
 
 - (instancetype)initWithVideo:(NSString *)videoPath
                   frameOutput:(NSString *)framePath
@@ -65,6 +68,7 @@
                  targetScreen:(NSScreen *)targetScreen;
 - (void)checkAndUpdatePlaybackState;
 - (void)transitionToVideo:(NSString *)newVideoPath withImagePath:(NSString *)newImagePath;
+- (void)preloadVideo:(NSString *)videoPath;
 @end
 
 // Crossfade duration in seconds
@@ -146,12 +150,20 @@ static const CGFloat kCrossfadeDuration = 1.5;
   _currentVideoPath = videoPath;
   _isTransitioning = NO;
 
-  NSURL *videoURL = [NSURL fileURLWithPath:videoPath];
+  // Support both local files and remote URLs
+  NSURL *videoURL;
+  BOOL isRemoteURL = [videoPath hasPrefix:@"http://"] || [videoPath hasPrefix:@"https://"];
+  if (isRemoteURL) {
+    videoURL = [NSURL URLWithString:videoPath];
+    NSLog(@"[Daemon] Streaming from URL: %@", videoPath);
+  } else {
+    videoURL = [NSURL fileURLWithPath:videoPath];
+  }
   
   // Store start time for sync across displays
   // Use video path as key so all daemons with same video sync together
-  NSString *startTimeKey = [NSString stringWithFormat:@"VideoStartTime_%@", 
-      [[videoPath lastPathComponent] stringByDeletingPathExtension]];
+  NSString *videoKey = isRemoteURL ? [[videoURL lastPathComponent] stringByDeletingPathExtension] : [[videoPath lastPathComponent] stringByDeletingPathExtension];
+  NSString *startTimeKey = [NSString stringWithFormat:@"VideoStartTime_%@", videoKey];
   NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
   [defaults synchronize];
   
@@ -814,12 +826,14 @@ static void terminateWallpaperDaemonCallback(CFNotificationCenterRef center,
 }
 
 static const double kSecondsBeforeEndToSwitch = 2.0;
+static const double kSecondsBeforeEndToPreload = 12.0;
 
 - (void)addLoopEndObserverForPlayer:(AVQueuePlayer *)player {
   [self removeLoopEndObserver];
   
   __weak typeof(self) weakSelf = self;
   _didFireEndNotificationThisLoop = NO;
+  _didFirePreloadNotificationThisLoop = NO;
   
   CMTime interval = CMTimeMakeWithSeconds(0.5, NSEC_PER_SEC);
   _loopEndTimeObserver = [player addPeriodicTimeObserverForInterval:interval
@@ -833,8 +847,19 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
     
     double currentSec = CMTimeGetSeconds(time);
     double durationSec = CMTimeGetSeconds(item.duration);
-    if (!isfinite(durationSec) || durationSec < kSecondsBeforeEndToSwitch + 1.0) return;
+    if (!isfinite(durationSec) || durationSec < kSecondsBeforeEndToPreload + 1.0) return;
     
+    // Fire preload notification 12 seconds before end
+    double preloadAtSec = durationSec - kSecondsBeforeEndToPreload;
+    if (currentSec >= preloadAtSec && !self->_didFirePreloadNotificationThisLoop) {
+      self->_didFirePreloadNotificationThisLoop = YES;
+      NSLog(@"[Daemon] Video ~%.0fs before end, requesting preload", kSecondsBeforeEndToPreload);
+      CFNotificationCenterPostNotification(
+          CFNotificationCenterGetDarwinNotifyCenter(),
+          CFSTR("com.live.wallpaper.preloadNext"), NULL, NULL, true);
+    }
+    
+    // Fire switch notification 2 seconds before end
     double switchAtSec = durationSec - kSecondsBeforeEndToSwitch;
     if (currentSec >= switchAtSec && !self->_didFireEndNotificationThisLoop) {
       self->_didFireEndNotificationThisLoop = YES;
@@ -844,6 +869,7 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
           CFSTR("com.live.wallpaper.videoEnded"), NULL, NULL, true);
     } else if (currentSec < 1.0) {
       self->_didFireEndNotificationThisLoop = NO;
+      self->_didFirePreloadNotificationThisLoop = NO;
     }
   }];
 }
@@ -855,122 +881,47 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
   }
 }
 - (bool)setStaticWallpaper {
-  return [self setStaticWallpaperSchedulingRepeat:YES];
+  // Disabled - no static wallpaper under video
+  return true;
 }
 
 - (bool)setStaticWallpaperSchedulingRepeat:(BOOL)scheduleRepeat {
-  @autoreleasepool {
-    if (!_framePath)
-      return false;
-    if (![[NSFileManager defaultManager] fileExistsAtPath:_framePath])
-      return false;
-    if (!_targetScreen)
-      return false;
+  // Disabled - no static wallpaper under video
+  return true;
+}
 
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSInteger scaleMode = [defaults integerForKey:@"scale_mode"];
-
-    NSImageScaling scaling = NSImageScaleProportionallyUpOrDown;
-    BOOL allowClipping = NO;
-
-    switch (scaleMode) {
-    case 0:
-      scaling = NSImageScaleProportionallyUpOrDown;
-      allowClipping = YES;
-      break;
-    case 1:
-      scaling = NSImageScaleProportionallyUpOrDown;
-      allowClipping = NO;
-      break;
-    case 2:
-      scaling = NSImageScaleAxesIndependently;
-      allowClipping = NO;
-      break;
-    case 3:
-      scaling = NSImageScaleNone;
-      allowClipping = NO;
-      break;
-    case 4:
-      scaling = NSImageScaleProportionallyUpOrDown;
-      allowClipping = YES;
-      break;
-    default:
-      break;
-    }
-    NSDictionary *options = @{
-      NSWorkspaceDesktopImageScalingKey : @(scaling),
-      NSWorkspaceDesktopImageAllowClippingKey : @(allowClipping),
-      NSWorkspaceDesktopImageFillColorKey : [NSColor blackColor]
-    };
-
-    NSURL *imageURL = [NSURL fileURLWithPath:_framePath];
-    NSError *error = nil;
-
-    {
-      NSNumber *screenNumber =
-          _targetScreen.deviceDescription[@"NSScreenNumber"];
-      CGDirectDisplayID did =
-          (CGDirectDisplayID)[screenNumber unsignedIntValue];
-
-      // Get display info from IOKit (public API)
-      CFDictionaryRef displayInfo = IODisplayCreateInfoDictionary(
-          CGDisplayIOServicePort(did), kIOReturnSuccess);
-
-      if (displayInfo) {
-        NSDictionary *info = (__bridge NSDictionary *)displayInfo;
-
-        NSString *uuid = info[@"DisplayUUID"];
-        if (uuid) {
-          // Build the desktop dictionary that macOS uses internally
-          NSMutableDictionary *desktopSpec = [NSMutableDictionary dictionary];
-          desktopSpec[@"ImageFilePath"] = _framePath;
-          desktopSpec[@"ImageFileURL"] = [imageURL absoluteString];
-          desktopSpec[@"NewDisplayDictionary"] = @{
-            @"desktop-picture-options" : @{
-              @"picture-options" : @(scaling),
-              @"allow-clipping" : @(allowClipping),
-              @"fill-color" : @"0 0 0"
-            }
-          };
-
-          // Write to com.apple.desktop preferences
-          CFPreferencesSetAppValue((__bridge CFStringRef)uuid,
-                                   (__bridge CFPropertyListRef)desktopSpec,
-                                   CFSTR("com.apple.desktop"));
-          CFPreferencesAppSynchronize(CFSTR("com.apple.desktop"));
-        }
-
-        CFRelease(displayInfo);
-      }
-    }
-
-    BOOL success =
-        [[NSWorkspace sharedWorkspace] setDesktopImageURL:imageURL
-                                                forScreen:_targetScreen
-                                                  options:options
-                                                    error:&error];
-    
-    if (success && scheduleRepeat) {
-      __weak typeof(self) weakSelf = self;
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [weakSelf setStaticWallpaperSchedulingRepeat:NO];
-      });
-    }
-    
-    if (success && [defaults boolForKey:@"restartDockOnWallpaperChange"]) {
-      // Restart Dock to update menu bar color
-      // Need longer delay for system to register new wallpaper
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        NSTask *task = [[NSTask alloc] init];
-        task.launchPath = @"/usr/bin/killall";
-        task.arguments = @[@"Dock"];
-        [task launch];
-        NSLog(@"[Daemon] Restarted Dock to update menu bar color");
-      });
-    }
-
-    return success;
+- (void)preloadVideo:(NSString *)videoPath {
+  if (!videoPath || videoPath.length == 0) return;
+  
+  // Don't preload if same as current
+  if ([videoPath isEqualToString:_currentVideoPath]) return;
+  
+  // Don't preload if already preloaded
+  if ([videoPath isEqualToString:_preloadedVideoPath] && _preloadedItem) return;
+  
+  NSLog(@"[Daemon] Starting preload for: %@", videoPath);
+  
+  BOOL isRemoteURL = [videoPath hasPrefix:@"http://"] || [videoPath hasPrefix:@"https://"];
+  NSURL *videoURL;
+  if (isRemoteURL) {
+    videoURL = [NSURL URLWithString:videoPath];
+  } else {
+    videoURL = [NSURL fileURLWithPath:videoPath];
   }
+  
+  // Create AVPlayerItem and start buffering
+  AVPlayerItem *item = [[AVPlayerItem alloc] initWithURL:videoURL];
+  
+  // Configure for preloading
+  CGFloat maxWidth = MIN(_targetScreen.frame.size.width, 2560.0f);
+  CGFloat maxHeight = MIN(_targetScreen.frame.size.height, 1440.0f);
+  item.preferredMaximumResolution = CGSizeMake(maxWidth, maxHeight);
+  item.preferredForwardBufferDuration = 10.0; // Buffer more for preload
+  
+  _preloadedItem = item;
+  _preloadedVideoPath = videoPath;
+  
+  NSLog(@"[Daemon] Preload started, buffering video");
 }
 
 - (void)transitionToVideo:(NSString *)newVideoPath withImagePath:(NSString *)newImagePath {
@@ -984,7 +935,9 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
     return;
   }
 
-  if (![[NSFileManager defaultManager] fileExistsAtPath:newVideoPath]) {
+  // Support both local files and remote URLs
+  BOOL isRemoteURL = [newVideoPath hasPrefix:@"http://"] || [newVideoPath hasPrefix:@"https://"];
+  if (!isRemoteURL && ![[NSFileManager defaultManager] fileExistsAtPath:newVideoPath]) {
     NSLog(@"[Daemon] Video file not found: %@", newVideoPath);
     return;
   }
@@ -993,29 +946,46 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
   NSLog(@"[Daemon] Starting crossfade transition to: %@", newVideoPath);
   
   // Reset start time for new video (first daemon to transition sets the time)
-  NSString *startTimeKey = [NSString stringWithFormat:@"VideoStartTime_%@", 
-      [[newVideoPath lastPathComponent] stringByDeletingPathExtension]];
+  NSURL *newVideoURL;
+  if (isRemoteURL) {
+    newVideoURL = [NSURL URLWithString:newVideoPath];
+    NSLog(@"[Daemon] Transitioning to streaming URL");
+  } else {
+    newVideoURL = [NSURL fileURLWithPath:newVideoPath];
+  }
+  
+  NSString *videoKey = isRemoteURL ? [[newVideoURL lastPathComponent] stringByDeletingPathExtension] : [[newVideoPath lastPathComponent] stringByDeletingPathExtension];
+  NSString *startTimeKey = [NSString stringWithFormat:@"VideoStartTime_%@", videoKey];
   NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
   _videoStartTime = [NSDate timeIntervalSinceReferenceDate];
   [defaults setDouble:_videoStartTime forKey:startTimeKey];
   [defaults synchronize];
   
   // Get new video duration
-  NSURL *newVideoURL = [NSURL fileURLWithPath:newVideoPath];
   AVAsset *newAsset = [AVAsset assetWithURL:newVideoURL];
   _videoDuration = CMTimeGetSeconds(newAsset.duration);
   if (_videoDuration <= 0) {
     _videoDuration = 60.0; // Fallback
   }
 
-  // Update frame path for static wallpaper
-  if (newImagePath && newImagePath.length > 0) {
+  // Update frame path for static wallpaper (only for local files)
+  if (!isRemoteURL && newImagePath && newImagePath.length > 0) {
     _framePath = newImagePath;
   }
 
-  // Create new player and layer
-  NSURL *videoURL = [NSURL fileURLWithPath:newVideoPath];
-  AVPlayerItem *newItem = [[AVPlayerItem alloc] initWithURL:videoURL];
+  // Create new player and layer - use preloaded item if available
+  AVPlayerItem *newItem;
+  if (_preloadedItem && [newVideoPath isEqualToString:_preloadedVideoPath]) {
+    NSLog(@"[Daemon] Using preloaded video item");
+    newItem = _preloadedItem;
+    _preloadedItem = nil;
+    _preloadedVideoPath = nil;
+  } else {
+    NSLog(@"[Daemon] Creating new video item (no preload available)");
+    NSURL *videoURL = newVideoURL;
+    newItem = [[AVPlayerItem alloc] initWithURL:videoURL];
+  }
+  
   AVQueuePlayer *newPlayer = [AVQueuePlayer queuePlayerWithItems:@[]];
   AVPlayerLooper *newLooper = [AVPlayerLooper playerLooperWithPlayer:newPlayer
                                                         templateItem:newItem];
@@ -1233,6 +1203,25 @@ static void AutoPauseChangedCallback(CFNotificationCenterRef center,
   [daemon setAutoPauseEnabled:enabled];
 }
 
+static void PreloadCallback(CFNotificationCenterRef center,
+                            void *observer, CFStringRef name,
+                            const void *object,
+                            CFDictionaryRef userInfo) {
+  VideoWallpaperDaemon *daemon = (__bridge VideoWallpaperDaemon *)observer;
+  
+  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+  [defaults synchronize];
+  
+  CGDirectDisplayID targetDisplayID = daemon.targetDisplayID;
+  NSString *key = [NSString stringWithFormat:@"PreloadVideo_%u", targetDisplayID];
+  NSString *preloadPath = [defaults stringForKey:key];
+  
+  if (preloadPath && preloadPath.length > 0) {
+    NSLog(@"[Daemon] Preloading video: %@", preloadPath);
+    [daemon preloadVideo:preloadPath];
+  }
+}
+
 static void VideoChangeCallback(CFNotificationCenterRef center,
                                 void *observer, CFStringRef name,
                                 const void *object,
@@ -1335,6 +1324,12 @@ int main(int argc, const char *argv[]) {
         CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge const void *)(daemon), VideoChangeCallback,
         CFSTR("com.live.wallpaper.videoChanged"), NULL,
+        CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    CFNotificationCenterAddObserver(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge const void *)(daemon), PreloadCallback,
+        CFSTR("com.live.wallpaper.preloadVideo"), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
 
     CFNotificationCenterAddObserver(

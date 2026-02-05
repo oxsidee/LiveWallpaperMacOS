@@ -38,8 +38,6 @@ struct LiveWallpaperApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var window: NSWindow!
-    var slideshowWindow: NSWindow?
-    var aerialWindow: NSWindow?
 
     let engine = sharedEngine
     let viewModel = WallpaperViewModel()
@@ -56,8 +54,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 
         let menu = NSMenu()
+        menu.delegate = self
         menu.addItem(NSMenuItem(title: "Manage wallpapers", action: #selector(showWindow), keyEquivalent: "m"))
-        menu.addItem(NSMenuItem(title: "Slideshow", action: #selector(showSlideshowWindow), keyEquivalent: "l"))
+        menu.addItem(NSMenuItem(title: "Next Wallpaper", action: #selector(nextWallpaper), keyEquivalent: "n"))
+        menu.addItem(NSMenuItem.separator())
+        
+        let onlyLocalItem = NSMenuItem(title: "Only Local Videos", action: #selector(toggleOnlyLocal), keyEquivalent: "")
+        onlyLocalItem.tag = 100
+        menu.addItem(onlyLocalItem)
+        
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -120,49 +125,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.orderOut(nil)
     }
 
-    // Show slideshow settings window
-    @objc func showSlideshowWindow() {
-        // Reload videos before showing the window
-        viewModel.reloadContent()
-
-        if slideshowWindow == nil {
-            slideshowWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 550, height: 650),
-                styleMask: [.titled, .closable, .fullSizeContentView],
-                backing: .buffered,
-                defer: false
-            )
-            slideshowWindow?.titlebarAppearsTransparent = true
-            slideshowWindow?.isMovableByWindowBackground = true
-            slideshowWindow?.title = "Slideshow Settings"
-            slideshowWindow?.isReleasedWhenClosed = false
-            slideshowWindow?.contentView = NSHostingView(rootView: SlideshowView(viewModel: viewModel))
-        }
-        slideshowWindow?.center()
-        slideshowWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    // Switch to next wallpaper
+    @objc func nextWallpaper() {
+        SlideshowManager.shared.switchToNextWallpaper()
     }
-
-    // Show Aerial download window
-    @objc func showAerialWindow() {
-        viewModel.reloadContent()
-
-        if aerialWindow == nil {
-            aerialWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 700, height: 600),
-                styleMask: [.titled, .closable, .fullSizeContentView],
-                backing: .buffered,
-                defer: false
-            )
-            aerialWindow?.titlebarAppearsTransparent = true
-            aerialWindow?.isMovableByWindowBackground = true
-            aerialWindow?.title = "Download Aerial Wallpapers"
-            aerialWindow?.isReleasedWhenClosed = false
-            aerialWindow?.contentView = NSHostingView(rootView: AerialBrowserView(viewModel: viewModel))
-        }
-        aerialWindow?.center()
-        aerialWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    
+    // Toggle only local videos
+    @objc func toggleOnlyLocal() {
+        SlideshowManager.shared.onlyLocalVideos.toggle()
     }
 
     // Quit the app completely
@@ -170,6 +140,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         engine?.terminateApplication()
         NSApp.terminate(nil)
+    }
+}
+
+// MARK: - NSMenuDelegate
+extension AppDelegate: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        if let item = menu.item(withTag: 100) {
+            item.state = SlideshowManager.shared.onlyLocalVideos ? .on : .off
+        }
     }
 }
 

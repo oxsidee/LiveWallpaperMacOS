@@ -1006,26 +1006,42 @@ static NSString *folderPath = nil;
   [defaults setObject:videoPath forKey:@"LastWallpaperPath"];
   [defaults synchronize];
 
-  const char *videoPathCStr = [videoPath UTF8String];
-  std::string videoPathStr(videoPathCStr);
-  std::filesystem::path p(videoPathStr);
-  std::string videoName = p.stem().string();
+  // Check if this is a remote URL
+  BOOL isRemoteURL = [videoPath hasPrefix:@"http://"] || [videoPath hasPrefix:@"https://"];
+  
+  std::string videoName;
+  NSString *imagePath = nil;
+  
+  if (isRemoteURL) {
+    // Extract video name from URL
+    NSURL *url = [NSURL URLWithString:videoPath];
+    NSString *lastComponent = [[url lastPathComponent] stringByDeletingPathExtension];
+    videoName = std::string([lastComponent UTF8String]);
+    NSLog(@"Starting stream from URL: %@", videoPath);
+    // No static wallpaper for streaming videos
+    imagePath = @"";
+  } else {
+    const char *videoPathCStr = [videoPath UTF8String];
+    std::string videoPathStr(videoPathCStr);
+    std::filesystem::path p(videoPathStr);
+    videoName = p.stem().string();
 
-  if (!fs::exists(videoPathStr)) {
-    NSLog(@"Video file does not exist: %@", videoPath);
-    return;
-  }
+    if (!fs::exists(videoPathStr)) {
+      NSLog(@"Video file does not exist: %@", videoPath);
+      return;
+    }
 
-  NSString *imageFilename =
-      [NSString stringWithFormat:@"%s.png", videoName.c_str()];
-  NSString *imagePath = [[self staticWallpaperCachePath]
-      stringByAppendingPathComponent:imageFilename];
+    NSString *imageFilename =
+        [NSString stringWithFormat:@"%s.png", videoName.c_str()];
+    imagePath = [[self staticWallpaperCachePath]
+        stringByAppendingPathComponent:imageFilename];
 
-  NSFileManager *fm = [NSFileManager defaultManager];
-  if (![fm fileExistsAtPath:imagePath] && !_generatingImages) {
-    NSLog(@"Static wallpaper not found, generating for: %@", videoPath);
-    [self generateStaticWallpapersForFolder:[self getFolderPath]
-                             withCompletion:nil];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:imagePath] && !_generatingImages) {
+      NSLog(@"Static wallpaper not found, generating for: %@", videoPath);
+      [self generateStaticWallpapersForFolder:[self getFolderPath]
+                               withCompletion:nil];
+    }
   }
   NSMutableArray<NSNumber *> *screensToUse = [displayIDs mutableCopy];
   if (screensToUse.count == 0) {
@@ -1068,19 +1084,33 @@ static NSString *folderPath = nil;
 
   NSLog(@"🔄 Initiating crossfade transition to: %@", videoPath);
 
-  // Generate image path
-  const char *videoPathCStr = [videoPath UTF8String];
-  std::filesystem::path p(videoPathCStr);
-  std::string videoName = p.stem().string();
+  // Check if this is a remote URL
+  BOOL isRemoteURL = [videoPath hasPrefix:@"http://"] || [videoPath hasPrefix:@"https://"];
+  
+  std::string videoName;
+  NSString *imagePath = @"";
+  
+  if (isRemoteURL) {
+    // Extract video name from URL
+    NSURL *url = [NSURL URLWithString:videoPath];
+    NSString *lastComponent = [[url lastPathComponent] stringByDeletingPathExtension];
+    videoName = std::string([lastComponent UTF8String]);
+    NSLog(@"Transitioning to streaming URL");
+  } else {
+    // Generate image path for local files
+    const char *videoPathCStr = [videoPath UTF8String];
+    std::filesystem::path p(videoPathCStr);
+    videoName = p.stem().string();
 
-  NSString *imageFilename = [NSString stringWithFormat:@"%s.png", videoName.c_str()];
-  NSString *imagePath = [[self staticWallpaperCachePath]
-      stringByAppendingPathComponent:imageFilename];
+    NSString *imageFilename = [NSString stringWithFormat:@"%s.png", videoName.c_str()];
+    imagePath = [[self staticWallpaperCachePath]
+        stringByAppendingPathComponent:imageFilename];
 
-  // Generate static wallpaper if needed
-  NSFileManager *fm = [NSFileManager defaultManager];
-  if (![fm fileExistsAtPath:imagePath] && !_generatingImages) {
-    [self generateStaticWallpapersForFolder:[self getFolderPath] withCompletion:nil];
+    // Generate static wallpaper if needed
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:imagePath] && !_generatingImages) {
+      [self generateStaticWallpapersForFolder:[self getFolderPath] withCompletion:nil];
+    }
   }
 
   // Store the new video path in UserDefaults for each display
