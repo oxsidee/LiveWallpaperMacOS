@@ -92,6 +92,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Initialize slideshow if enabled
         _ = SlideshowManager.shared
+
+        // On screen unlock: re-apply wallpapers and restart slideshow if enabled
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(screenUnlocked),
+            name: NSNotification.Name("com.apple.screenIsUnlocked"),
+            object: nil
+        )
+    }
+
+    @objc private func screenUnlocked() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            sharedEngine?.reapplyWallpapersToAllDisplays()
+            SlideshowManager.shared.reloadSettingsAfterUnlock()
+        }
     }
 
     // Show the config window

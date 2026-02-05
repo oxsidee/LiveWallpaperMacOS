@@ -78,6 +78,7 @@
 - (void)checkFolderPath;
 - (void)scanDisplays;
 - (void)selctFolder:(NSString* )path;
+- (void)reapplyWallpapersToAllDisplays;
 
 - (NSArray *)getDisplays;
 

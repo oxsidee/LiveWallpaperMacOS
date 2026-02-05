@@ -295,13 +295,9 @@ static const CGFloat kCrossfadeDuration = 1.5;
 
 - (void)screenUnlocked:(NSNotification *)note {
   NSLog(@"[Daemon] Screen unlocked");
-
   self.screen_locked = false;
-  // Resume if it was playing before sleep
-  if (self.wasPlayingBeforeSleep) {
-    NSLog(@"[Daemon] Resuming playback after screen unlock");
-    [self resumeAllPlayers];
-  }
+
+  [self setStaticWallpaper];
 
   dispatch_after(
       dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -859,6 +855,10 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
   }
 }
 - (bool)setStaticWallpaper {
+  return [self setStaticWallpaperSchedulingRepeat:YES];
+}
+
+- (bool)setStaticWallpaperSchedulingRepeat:(BOOL)scheduleRepeat {
   @autoreleasepool {
     if (!_framePath)
       return false;
@@ -949,6 +949,13 @@ static const double kSecondsBeforeEndToSwitch = 2.0;
                                                 forScreen:_targetScreen
                                                   options:options
                                                     error:&error];
+    
+    if (success && scheduleRepeat) {
+      __weak typeof(self) weakSelf = self;
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [weakSelf setStaticWallpaperSchedulingRepeat:NO];
+      });
+    }
     
     if (success && [defaults boolForKey:@"restartDockOnWallpaperChange"]) {
       // Restart Dock to update menu bar color

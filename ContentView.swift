@@ -974,6 +974,11 @@ class SlideshowManager: ObservableObject {
             start()
         }
     }
+
+    /// Call after screen unlock to re-apply settings and start slideshow if enabled.
+    func reloadSettingsAfterUnlock() {
+        loadSettings()
+    }
     
     private func setupVideoEndNotification() {
         // Listen for video end notification from daemon
